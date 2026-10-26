@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>我的保证金 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var F = qs.get('t') || 'all';
+  var TYPE_CLS = { '缴纳': 'pri', '冻结': 'warn', '退还': 'ok', '划扣': 'danger', '没收': 'danger' };
+
+  function txns() {
+    var all = APP.myTxns().slice().sort(function (a, b) { return String(b.occur_time || b.create_time).localeCompare(String(a.occur_time || a.create_time)); });
+    if (F === 'all') return all;
+    return all.filter(function (t) { return t.action_type === F; });
+  }
+
+  function bodyHTML() {
+    var acct = APP.depositAccount();
+    var counts = {};
+    APP.myTxns().forEach(function (t) { counts[t.action_type] = (counts[t.action_type] || 0) + 1; });
+
+    return '<div class="card" style="background:linear-gradient(150deg,#c8102e,#8f0a1f);color:#fff;border:0">' +
+      '<div class="cb" style="padding:16px 14px">' +
+      '<div style="font-size:12px;opacity:.85">保证金账户 · 冻结中</div>' +
+      '<div style="font-size:30px;font-weight:700;letter-spacing:-.5px">¥' + X.yuan(acct.frozen) + '</div>' +
+      '<div style="display:flex;gap:16px;margin-top:11px;font-size:12px;opacity:.95">' +
+      '<span>累计缴纳 ¥' + X.w(acct.paid) + ' 万</span>' +
+      '<span>累计退还 ¥' + X.w(acct.refunded) + ' 万</span>' +
+      '<span>累计划扣 ¥' + X.w(acct.forfeited) + ' 万</span>' +
+      '</div>' +
+      '<div style="margin-top:11px;font-size:11.5px;opacity:.85;line-height:1.7">' +
+      '保证金是<b>流水体系</b>（DepositTxn），不是账户上的一个余额字段；每笔缴纳 / 冻结 / 退还 / 划扣都有独立流水号与银行流水号，只增不改。' +
+      '</div></div></div>' +
+
+    '<div class="grid3" style="margin-bottom:10px">' +
+      g('缴纳', counts['缴纳'] || 0) + g('冻结', counts['冻结'] || 0) + g('退还', counts['退还'] || 0) +
+      '</div>' +
+
+    (acct.frozen > 0 ? '<div class="note warn" style="margin-bottom:10px"><span class="ni">ⓘ</span><div>' +
+      '当前有 <b>¥' + X.yuan(acct.frozen) + '</b> 处于冻结状态，将在对应场次结束后按规则解冻或划转。' +
+      '未中拍的保证金在竞价结束后 3 个工作日内原路解冻。</div></div>' : '') +
+
+    '<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:9px">' +
+      [['all', '全部 ' + APP.myTxns().length], ['缴纳', '缴纳 ' + (counts['缴纳'] || 0)], ['冻结', '冻结 ' + (counts['冻结'] || 0)],
+       ['退还', '退还 ' + (counts['退还'] || 0)], ['划扣', '划扣 ' + ((counts['划扣'] || 0) + (counts['没收'] || 0))]]
+        .map(function (s) {
+          return '<button class="btn sm" style="flex:none;' + (F === s[0] ? 'background:var(--pri);color:#fff;border-color:var(--pri)' : '') +
+            '" data-go="mine/deposit.html?t=' + encodeURIComponent(s[0]) + '">' + X.esc(s[1]) + '</button>';
+        }).join('') + '</div>' +
+
+    (txns().length
+      ? '<div class="list">' + txns().map(function (t) {
+          var ctx = t.reg_id ? (DB.get('bidRegs', t.reg_id) || {}) : {};
+          var ses = ctx.session_id ? DB.get('sessions', ctx.session_id) : null;
+          var asset = ses ? DB.get('assets', ses.asset_id) : null;
+          var sign = t.action_type === '退还' || t.action_type === '划扣' || t.action_type === '没收' ? '−' : '+';
+          return '<div class="li"><span style="font-size:17px">' +
+            (t.action_type === '退还' ? '↩️' : t.action_type === '缴纳' || t.action_type === '冻结' ? '💰' : '⚠️') + '</span>' +
+            '<div class="li-main"><div class="li-t">' + X.esc(t.action_type) + '　' +
+            APP.tag(t.status, t.status === '成功' ? 'ok' : 'warn') + '</div>' +
+            '<div class="li-s">' + X.esc(t.txn_id) + ' · ' + X.esc(t.channel) + '<br>' +
+            (asset ? X.esc(asset.asset_name) + '<br>' : '') +
+            X.esc(t.occur_time) + (t.trade_no ? ' · 银行流水 ' + X.esc(t.trade_no) : '') + '</div></div>' +
+            '<div class="li-r"><div class="bold ' + (sign === '+' ? 'c-pri' : 'c-ok') + '">' + sign + '¥' + X.w(t.amount) + '万</div>' +
+            (ctx.reg_id ? '<div class="xs muted">' + X.esc(ctx.reg_id) + '</div>' : '') + '</div></div>';
+        }).join('') + '</div>'
+      : '<div class="empty"><div class="ei">💰</div><div class="et">暂无该类型的流水</div></div>') +
+
+    APP.card('退还规则', '<div class="note"><span class="ni">ⓘ</span><div>' +
+      '① <b>未中拍</b>：竞价结束后 3 个工作日内原路解冻；<br>' +
+      '② <b>报名后取消</b>：报名截止前可撤回，保证金按规则解冻（可能扣手续费，可配置）；<br>' +
+      '③ <b>中标成交</b>：保证金自动转为价款抵扣（生成「冻结」流水并挂到订单）；<br>' +
+      '④ <b>违约处罚</b>：按处罚规则划扣或没收，并生成独立流水；<br>' +
+      '⑤ 保证金<b>未按时缴纳</b>：报名记录置「失效」，不参与竞价，T-24h / T-2h / T-10min 三次提醒。</div></div>');
+  }
+
+  function g(l, v) { return '<div class="gcell"><div class="gv">' + v + '</div><div class="gl">' + l + '</div></div>'; }
+
+  APP.mount(APP.shell({
+    title: '我的保证金', backTo: 'back', sideActive: '我的-保证金',
+    body: '<div style="padding:12px">' + bodyHTML() + '</div>'
+  }));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>我的认证 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var quals = DB.all('quals').filter(function (q) { return q.subject_id === me.subject_id; });
+  var passed = quals.filter(function (q) { return q.audit_status === '通过'; });
+  var rejected = quals.filter(function (q) { return q.audit_status === '驳回' || q.audit_status === '不通过'; });
+  var reviewing = quals.filter(function (q) { return q.audit_status === '审核中' || q.audit_status === '待审核'; });
+
+  /* 可补充资质候选 = 通用资质清单 ∪ 全部资产实际要求的专项资质。
+     必须覆盖资产要求的每一种资质：否则当某资产要求一个清单外的资质时，
+     竞买人无法补齐，报名校验链第 4 步永久拦截 → 死锁（如 AST-0001 要求「辐射安全许可证」）。 */
+  var QUAL_CANDIDATES = (function () {
+    var base = ['危化品经营许可证', '危险货物运输许可证', '特种设备使用登记证',
+      '再生资源回收经营者备案', '成品油批发经营批准证书', '道路运输经营许可证', '辐射安全许可证'];
+    DB.all('assets').forEach(function (a) {
+      (a.required_qual || []).forEach(function (t) { if (base.indexOf(t) < 0) base.push(t); });
+    });
+    return base;
+  })();
+
+  function daysTo(d) {
+    var a = U.asDate(d); if (!a) return null;
+    return Math.round((a.getTime() - APP.SERVER_TIME.getTime()) / 86400000);
+  }
+
+  function bodyHTML() {
+    var stepIdx = passed.length && !rejected.length ? 3 : rejected.length ? 1 : 2;
+    return '<div class="card"><div class="cb">' +
+      '<div class="steps">' +
+      ['提交资料', '资质审核', '认证完成'].map(function (s, i) {
+        return '<div class="s ' + (i < stepIdx ? 'done' : i === stepIdx ? 'cur' : '') + '" data-n="' + (i + 1) + '">' + s + '</div>';
+      }).join('') + '</div>' +
+      '<div style="margin-top:13px;display:flex;gap:10px;align-items:center">' +
+      '<div class="avatar">' + X.esc(String(me.subject_name).slice(0, 1)) + '</div>' +
+      '<div style="flex:1"><div class="bold">' + X.esc(me.subject_name) + '</div>' +
+      '<div class="xs muted">' + X.esc(me.uscc) + '</div></div>' +
+      (me.status === '已准入' ? APP.tag('已认证', 'ok') : APP.tag(me.status, 'warn')) +
+      '</div>' +
+      '<div class="note ' + (rejected.length ? 'warn' : 'ok') + '" style="margin-top:10px"><span class="ni">' + (rejected.length ? '⚠' : '✓') + '</span><div>' +
+      (rejected.length
+        ? '有 <b>' + rejected.length + ' 项资质被驳回</b>，请按驳回原因补充材料后重新提交。驳回期间不影响已成交订单的履约。'
+        : '主体实名认证已通过，资质有效 ' + passed.length + ' 项，可正常参与报名与出价。') +
+      '</div></div></div></div>' +
+
+    APP.card('主体信息', APP.kvRows([
+      ['主体类型', X.esc(me.subject_type || '企业')],
+      ['主体名称', X.esc(me.subject_name), 'left'],
+      ['统一社会信用代码', '<span class="mono small">' + X.esc(me.uscc) + '</span>'],
+      ['法定代表人', X.esc(me.legal_person)],
+      ['注册资本', X.esc(me.reg_capital) + ' 万元'],
+      ['成立日期', X.esc(me.found_date)],
+      ['所属行业', X.esc(me.industry)],
+      ['注册地', X.esc(me.reg_region)],
+      ['企业规模', X.esc(me.scale)],
+      ['经营范围', X.esc(me.business_scope), 'left']
+    ]) + '<button class="btn blk line-pri" id="editInfo">申请变更主体信息</button>' +
+      '<div class="xs muted" style="margin-top:7px">主体信息变更需重新审核；审核期间可继续参与竞价，但成交后须先完成变更方可签约。</div>') +
+
+    APP.card('资质列表', quals.length
+      ? '<div class="checks">' + quals.map(function (q) {
+          var ok = q.audit_status === '通过';
+          var dd = q.qual_end ? daysTo(q.qual_end) : null;
+          var near = dd !== null && dd >= 0 && dd <= 30;
+          var exp = dd !== null && dd < 0;
+          return '<div class="ck ' + (ok && !exp ? 'ok' : 'no') + '">' +
+            '<div class="ci">' + (ok && !exp ? '✓' : '!') + '</div>' +
+            '<div class="cm"><div class="ct">' + X.esc(q.qual_type) + '　' +
+            APP.tag(q.audit_status, ok ? 'ok' : 'danger') +
+            (near ? ' ' + APP.tag('临期 ' + dd + ' 天', 'warn') : '') +
+            (exp ? ' ' + APP.tag('已过期', 'danger') : '') + '</div>' +
+            '<div class="cd">证书编号 <span class="mono">' + X.esc(q.qual_no || '—') + '</span>' +
+            (q.qual_end ? '<br>有效期至 ' + X.esc(q.qual_end) : '') +
+            (q.audit_remark ? '<br><b>驳回原因：</b>' + X.esc(q.audit_remark) : '') + '</div>' +
+            (ok && !near && !exp ? '' : '<button class="btn sm line-pri" style="margin-top:5px" data-up="' + X.esc(q.qual_id) + '">' +
+              (exp ? '重新上传' : near ? '更新有效期' : '补充材料') + '</button>') +
+            '</div></div>';
+        }).join('') + '</div>'
+      : '<div class="empty" style="padding:22px 0"><div class="et">暂无资质记录</div></div>',
+      passed.length + ' / ' + quals.length + ' 有效') +
+
+    APP.card('补充 / 新增资质', '<div class="xs muted" style="margin-bottom:8px">资质是报名的前置条件：资产要求的资质必须在报名时全部有效，否则报名校验链第 4 步将拦截。</div>' +
+      '<div class="list tight">' + QUAL_CANDIDATES
+        .filter(function (t) {
+          /* 已通过、以及已提交待审的资质不再重复出现在「可补充」里，避免重复提交同一份证件 */
+          return !quals.some(function (q) {
+            return q.qual_type === t && (q.audit_status === '通过' || q.audit_status === '审核中' || q.audit_status === '待审核');
+          });
+        })
+      .map(function (t) {
+        return '<a class="li" data-add="' + X.esc(t) + '"><span style="font-size:17px">📄</span>' +
+          '<div class="li-main"><div class="li-t">' + X.esc(t) + '</div><div class="li-s">未提交，点击上传并提交审核</div></div>' +
+          '<span class="arrow">›</span></a>';
+      }).join('') + '</div>') +
+
+    (reviewing.length ? APP.card('审核中', '<div class="list tight">' + reviewing.map(function (q) {
+      return '<div class="li"><span style="font-size:17px">⏳</span><div class="li-main">' +
+        '<div class="li-t">' + X.esc(q.qual_type) + '</div><div class="li-s">提交于 ' + X.esc(q.submit_time || q.create_time) + '，预计 1–2 个工作日完成</div>' +
+        '</div>' + APP.tag('审核中', 'warn') + '</div>';
+    }).join('') + '</div>') : '') +
+
+    APP.card('认证说明', '<div class="note"><span class="ni">ⓘ</span><div>' +
+      '① 实名/企业认证<b>必做</b>，未认证不可报名；<br>' +
+      '② 资质证件仅本人与授权角色可见，敏感信息加密存储、脱敏展示；<br>' +
+      '③ 资质到期前 30 天会收到提醒，届时将无法报名该类资产；<br>' +
+      '④ 资质过期不影响<b>已成交订单</b>的正常履约。</div></div>');
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '我的认证', backTo: 'back', sideActive: '我的-认证',
+      body: '<div style="padding:12px">' + bodyHTML() + '</div>'
+    }));
+    bind();
+  }
+
+  function bind() {
+    document.querySelectorAll('[data-up]').forEach(function (b) {
+      b.onclick = function () { submitQual(DB.get('quals', b.getAttribute('data-up')).qual_type, b.getAttribute('data-up')); };
+    });
+    document.querySelectorAll('[data-add]').forEach(function (b) {
+      b.onclick = function () { submitQual(b.getAttribute('data-add'), null); };
+    });
+    var ei = document.getElementById('editInfo');
+    if (ei) ei.onclick = function () {
+      APP.sheet({
+        title: '申请变更主体信息',
+        body: '<div class="fld"><label>变更项<span class="req">*</span></label><select id="k">' +
+          ['法定代表人', '注册资本', '经营范围', '注册地', '企业名称'].map(function (t) { return '<option>' + t + '</option>'; }).join('') +
+          '</select></div>' +
+          '<div class="fld"><label>变更后内容<span class="req">*</span></label><textarea id="v" rows="2" placeholder="请填写变更后的内容"></textarea></div>' +
+          '<div class="fld"><label>变更依据</label><div class="gcell" style="border:1px dashed var(--line);text-align:center;cursor:pointer">' +
+          '<div style="font-size:20px">📎</div><div class="xs muted">上传工商变更核准通知书</div></div></div>' +
+          '<div class="note warn"><span class="ni">⚠</span><div>主体信息变更需重新审核；审核期间可继续竞价，但成交后须先完成变更方可签约。</div></div>',
+        foot: '<button class="btn grow" data-close="1">取消</button><button class="btn pri grow" id="okInfo">提交申请</button>',
+        onReady: function (w) {
+          w.querySelector('#okInfo').onclick = function () {
+            var k = w.querySelector('#k').value, v = w.querySelector('#v').value.trim();
+            if (!v) { APP.toast('请填写变更后内容', 'err'); return; }
+            var id = 'TKT-' + String(DB.all('tickets').length + 1).padStart(4, '0');
+            DB.insert('tickets', {
+              ticket_id: id, subject_id: me.subject_id, type: '主体信息变更',
+              title: '主体信息变更申请：' + k, content: '变更后内容：' + v,
+              status: '处理中', reply: '', create_time: '2026-10-09 ' + WB.nowHM(), reply_time: null
+            });
+            APP.closeSheets();
+            APP.toast('变更申请已提交，工单 ' + id, 'ok');
+          };
+        }
+      });
+    };
+  }
+
+  /* 资质提交：真实写入 quals（审核中），供后台准入审核下钻 */
+  function submitQual(type, qualId) {
+    APP.sheet({
+      title: (qualId ? '更新资质 · ' : '新增资质 · ') + type,
+      body: '<div class="fld"><label>证书编号<span class="req">*</span></label><input id="qno" placeholder="如 XK2026010001"></div>' +
+        '<div class="fld"><label>有效期至<span class="req">*</span></label><input id="qend" type="date" value="' + X.esc(X.planDate('2026-10-09', '年', 1).slice(0, 10)) + '"></div>' +
+        '<div class="fld"><label>证件扫描件<span class="req">*</span></label>' +
+        '<div class="gcell" id="qup" style="border:1px dashed var(--line);text-align:center;cursor:pointer">' +
+        '<div style="font-size:20px">📎</div><div class="xs muted" id="qT">上传证书扫描件（jpg / pdf）</div></div></div>' +
+        '<div class="note"><span class="ni">ⓘ</span><div>提交后进入后台「准入审核」，审核结果会通过消息中心通知。</div></div>',
+      foot: '<button class="btn grow" data-close="1">取消</button><button class="btn pri grow" id="okQ">提交审核</button>',
+      onReady: function (w) {
+        w.querySelector('#qup').onclick = function () {
+          var t = w.querySelector('#qT'); t.className = 'xs c-ok'; t.textContent = '✓ 已选择：' + type + '_扫描件.pdf';
+        };
+        w.querySelector('#okQ').onclick = function () {
+          var no = w.querySelector('#qno').value.trim();
+          var end = w.querySelector('#qend').value;
+          var t2 = w.querySelector('#qT');
+          if (!no) { APP.toast('请填写证书编号', 'err'); return; }
+          if (!end) { APP.toast('请选择有效期', 'err'); return; }
+          if (t2.className.indexOf('c-ok') < 0) { APP.toast('请上传证书扫描件', 'err'); return; }
+          if (qualId) {
+            DB.update('quals', qualId, { qual_no: no, qual_end: end, audit_status: '审核中', audit_remark: '', submit_time: '2026-10-09 ' + WB.nowHM() });
+          } else {
+            DB.insert('quals', {
+              qual_id: 'QUA-' + String(DB.all('quals').length + 1).padStart(4, '0'),
+              subject_id: me.subject_id, qual_type: type, qual_no: no,
+              qual_end: end, audit_status: '审核中', audit_remark: '',
+              submit_time: '2026-10-09 ' + WB.nowHM(), create_time: '2026-10-09 ' + WB.nowHM()
+            });
+          }
+          DB.audit('资质提交', me.subject_id, '竞买人 ' + me.subject_name + ' 提交资质「' + type +
+            '」（证书编号 ' + no + '，有效期至 ' + end + '），状态置为「审核中」', { level: '重要', role: '竞买人' });
+          quals = DB.all('quals').filter(function (q) { return q.subject_id === me.subject_id; });
+          passed = quals.filter(function (q) { return q.audit_status === '通过'; });
+          reviewing = quals.filter(function (q) { return q.audit_status === '审核中' || q.audit_status === '待审核'; });
+          APP.closeSheets();
+          APP.toast('已提交，等待后台审核', 'ok');
+          render();
+        };
+      }
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>支付价款 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var order = APP.pickOrder(qs.get('order'));
+  if (!order) { empty(); return; }
+  var asset = order.asset_id ? DB.get('assets', order.asset_id) : null;
+  /* 历史存量订单无线上资产：用「品类 + 订单号」标识这笔付款，避免标题区空白 */
+  var orderLabel = asset ? asset.asset_name : (order.category + '类资产（历史存量订单）');
+  var perf = APP.perfOf(order.order_id);
+  var pay = E.payable(order);
+  var pays = DB.all('payments').filter(function (p) { return p.order_id === order.order_id; });
+  var inv = DB.find('invoices', function (i) { return i.order_id === order.order_id; });
+  var paid = pays.filter(function (p) { return p.status === '成功'; }).reduce(function (t, p) { return t + p.amount; }, 0);
+  var remain = Math.max(0, pay.total - paid);
+  var isDemo = String(order.order_no).indexOf('DEMO') === 0;
+  var CH = '银企直连';
+
+  function empty() {
+    APP.mount(APP.shell({
+      title: '支付价款', backTo: 'back', sideActive: '支付',
+      body: '<div class="empty"><div class="ei">💳</div><div class="et">暂无待支付的订单</div>' +
+        '<button class="btn line-pri sm" style="margin-top:10px" data-go="mine/orders.html">查看我的订单</button></div>'
+    }));
+  }
+
+  function bodyHTML() {
+    var dl = perf ? perf.pay_deadline : '—';
+    var overdue = perf && perf.is_overdue && remain > 0;
+    return '<div class="card"><div class="cb center">' +
+      '<div class="xs muted">' + X.esc(order.order_id) + ' · ' + X.esc(orderLabel) + '</div>' +
+      '<div class="xs muted" style="margin-top:2px">' + (remain > 0 ? '待支付金额' : '已付清') + '</div>' +
+      '<div class="price big">¥' + X.yuan(remain) + '</div>' +
+      (remain > 0
+        ? '<div class="note ' + (overdue ? 'danger' : 'warn') + '" style="margin-top:9px;text-align:left"><span class="ni">⏰</span><div>' +
+          '付款截止 <b>' + X.esc(dl) + '</b>' + (overdue ? '（<b class="c-danger">已逾期</b>）' : '，逾期将触发违约认定（BT02）') +
+          (paid > 0 ? '<br>已支付 ¥' + X.yuan(paid) + '，剩余 ¥' + X.yuan(remain) : '') + '</div></div>'
+        : '<div class="note ok" style="margin-top:9px;text-align:left"><span class="ni">✓</span><div>价款已付清，可继续进行交割提货。</div></div>') +
+      '</div></div>' +
+
+      APP.card('应付金额构成', APP.kvRows([
+        ['成交价', '¥' + X.yuan(pay.deal)],
+        ['佣金（' + X.pct(pay.commissionRate) + '）', '¥' + X.yuan(pay.commission)],
+        ['税费（' + X.pct(order.tax_rate) + '）', '¥' + X.yuan(pay.tax)],
+        ['保证金抵扣', '<span class="c-ok">−¥' + X.yuan(pay.depositOffset) + '</span>'],
+        ['应付总额', '<b class="price">¥' + X.yuan(pay.total) + '</b>'],
+        ['已支付', '¥' + X.yuan(paid)],
+        ['待支付', '<b class="' + (remain > 0 ? 'c-danger' : 'c-ok') + '">¥' + X.yuan(remain) + '</b>']
+      ]) + '<div class="xs muted" style="margin-top:7px">' + X.esc(pay.explain) + '</div>') +
+
+      (remain > 0 ? APP.card('支付方式', ['银企直连', '对公转账', '第三方支付'].map(function (c) {
+        var on = CH === c;
+        return '<label style="display:flex;gap:9px;align-items:center;padding:10px;border:1px solid ' +
+          (on ? 'var(--pri)' : 'var(--line)') + ';background:' + (on ? 'var(--pri-l)' : '#fff') +
+          ';border-radius:10px;margin-bottom:8px;cursor:pointer">' +
+          '<input type="radio" name="ch" value="' + c + '"' + (on ? ' checked' : '') + ' style="width:auto">' +
+          '<span style="flex:1;font-size:13px" class="' + (on ? 'bold' : '') + '">' + c + '</span>' +
+          (c === '银企直连' ? APP.tag('实时到账', 'ok') : c === '对公转账' ? APP.tag('需上传凭证', 'warn') : APP.tag('限额 500 万', '')) +
+          '</label>';
+      }).join('') +
+        (CH === '对公转账' ? '<div class="note gray"><span class="ni">🏦</span><div>户名：中油易拍客电子商务有限公司<br>' +
+          '账号：0200 0031 0920 0088 666<br>备注：<b class="mono">' + X.esc(order.order_no) + '</b></div></div>' +
+          '<div class="fld" style="margin-top:10px"><label>上传付款凭证</label>' +
+          '<div class="gcell" id="up" style="cursor:pointer;border:1px dashed var(--line)">' +
+          '<div style="font-size:20px">📎</div><div class="xs muted" id="upT">点击选择凭证文件</div></div></div>' : '')
+      ) : '') +
+
+      APP.card('付款流水', (pays.length
+        ? '<div class="tl">' + pays.map(function (p) {
+            return '<div class="ti ' + (p.status === '成功' ? 'done' : 'cur') + '">' +
+              '<div class="tt">¥' + X.yuan(p.amount) + '　' + APP.tag(p.status, p.status === '成功' ? 'ok' : 'warn') + '</div>' +
+              '<div class="tb">渠道 ' + X.esc(p.channel) + '<br>银行流水号 <span class="mono">' + X.esc(p.trade_no) + '</span></div>' +
+              '<div class="tm">' + X.esc(p.pay_time || p.create_time) + ' · ' + X.esc(p.payment_id) + '</div></div>';
+          }).join('') + '</div>'
+        : '<div class="empty" style="padding:20px 0"><div class="ei">🧾</div><div class="et">暂无付款流水</div>' +
+          '<div class="es">付款完成后将生成银行流水号</div></div>') +
+      '<div class="xs muted" style="margin-top:8px">付款流水为<b>不可变追加型</b>数据，只增不改，含银行流水号，可回溯。' +
+      '每次支付请求携带<b>幂等键</b>（IDEM-…），重复提交不会重复扣款。</div>') +
+
+      APP.card('发票', inv
+        ? APP.kvRows([
+            ['发票抬头', X.esc(inv.title), 'left'],
+            ['纳税人识别号', '<span class="mono small">' + X.esc(inv.tax_no) + '</span>'],
+            ['发票类型', X.esc(inv.type)],
+            ['金额 / 税率', '¥' + X.yuan(inv.amount) + ' / ' + X.pct(inv.tax_rate)],
+            ['状态', APP.tag(inv.status, 'ok')]
+          ]) + '<button class="btn blk" data-toast="发票下载（原型演示）">下载电子发票</button>'
+        : '<div class="xs muted">付款到账后可申请开票。</div><button class="btn blk line-pri" style="margin-top:8px" data-go="trade/invoice.html?order=' + order.order_id + '">去申请开票</button>') +
+
+      (isDemo ? '<div class="note gray"><span class="ni">ⓘ</span><div>本单由 APP 原型自举生成，用于演示签约 / 付款 / 交割链路。</div></div>' : '');
+  }
+
+  function barHTML() {
+    if (remain <= 0) return '<div class="actionbar"><button class="btn lg grow" data-go="trade/invoice.html?order=' + order.order_id + '">发票管理</button>' +
+      '<button class="btn pri lg grow" data-go="trade/delivery.html?order=' + order.order_id + '">去交割</button></div>';
+    return '<div class="actionbar"><button class="btn lg grow" data-go="trade/contract.html?order=' + order.order_id + '">合同</button>' +
+      '<button class="btn pri lg grow" id="pay">确认支付 ¥' + X.yuan(remain) + '</button></div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '支付价款', backTo: 'back', sideActive: '支付',
+      body: '<div style="padding:12px">' + bodyHTML() + '</div>', bar: barHTML()
+    }));
+    bind();
+  }
+
+  function bind() {
+    document.querySelectorAll('input[name="ch"]').forEach(function (r) {
+      r.onchange = function () { CH = r.value; render(); };
+    });
+    var up = document.getElementById('up');
+    if (up) up.onclick = function () {
+      var t = document.getElementById('upT');
+      if (t) { t.className = 'xs c-ok'; t.textContent = '✓ 已选择：付款凭证.jpg（原型演示）'; }
+    };
+    var pb = document.getElementById('pay');
+    if (!pb) return;
+    pb.onclick = function () {
+      if (CH === '对公转账') {
+        var t = document.getElementById('upT');
+        if (!t || t.className.indexOf('c-ok') < 0) { APP.toast('对公转账须先上传付款凭证', 'err'); return; }
+      }
+      APP.dialog({
+        title: '确认支付',
+        body: '支付方式：<b>' + X.esc(CH) + '</b><br>金额：<b class="price">¥' + X.yuan(remain) + '</b><br>' +
+          '<span class="xs muted">幂等键 IDEM-' + X.esc(X.hash(order.order_id + remain).toString(16).slice(0, 8)) + '，重复提交不会重复扣款。</span>',
+        okText: '确认支付',
+        onOk: function () {
+          var manual = CH === '对公转账';
+          var id = 'PAY-' + String(DB.all('payments').length + 1).padStart(4, '0');
+          var t = '2026-10-09 ' + WB.nowHM();
+          DB.insert('payments', {
+            payment_id: id, order_id: order.order_id, amount: remain, channel: CH,
+            trade_no: (manual ? 'MANUAL' : 'BANK') + X.hash(order.order_id + id).toString().slice(0, 12),
+            status: manual ? '支付中' : '成功', pay_time: manual ? null : t, create_time: t
+          });
+          var ns = Object.assign({}, (perf && perf.node_status) || {});
+          if (!manual) {
+            ns.pay = t;
+            DB.update('performance', perf.perf_id, { node_status: ns, status: '已付款', pay_time: t });
+            DB.update('orders', order.order_id, { status: '已付款' });
+            /* 付款成功后自动开票 */
+            if (!DB.find('invoices', function (i) { return i.order_id === order.order_id; })) {
+              DB.insert('invoices', {
+                invoice_id: 'INV-' + String(DB.all('invoices').length + 1).padStart(4, '0'),
+                order_id: order.order_id, title: me.subject_name, tax_no: me.uscc,
+                amount: order.total_amount, tax_rate: order.tax_rate, type: '增值税专用发票',
+                status: '已开', issue_time: t, create_time: t
+              });
+            }
+          }
+          DB.audit('价款支付', order.order_id, '竞买人 ' + me.subject_name + ' 支付价款 ¥' + X.yuan(remain) +
+            '，渠道 ' + CH + '，流水 ' + id + '（' + (manual ? '待人工核销' : '实时到账') + '）', { level: '重要', role: '竞买人' });
+          pays = DB.all('payments').filter(function (p) { return p.order_id === order.order_id; });
+          inv = DB.find('invoices', function (i) { return i.order_id === order.order_id; });
+          paid = pays.filter(function (p) { return p.status === '成功'; }).reduce(function (s, p) { return s + p.amount; }, 0);
+          remain = Math.max(0, pay.total - paid);
+          perf = APP.perfOf(order.order_id);
+          order = DB.get('orders', order.order_id);
+          APP.toast(manual ? '已提交，等待人工核销到账' : '支付成功，发票已自动开具', 'ok', 2600);
+          render();
+        }
+      });
+    };
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>帮助与客服 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var kw = '';                 /* 搜索关键词 */
+  var openFaq = {};            /* FAQ 展开状态 */
+
+  /* ---------- 规则口径：直接读 rules 集合，与后台同一批记录 ---------- */
+  function rulesOf(type) {
+    return DB.filter('rules', function (r) {
+      return r.rule_type === type && r.status === '生效';
+    });
+  }
+
+  /* ---------- FAQ 数据（答案文本与 PRD 文案规范一致） ---------- */
+  var FAQ = [
+    ['保证金什么时候退还？',
+      '未中拍的保证金在竞价结束后 <b>3 个工作日</b>内原路解冻；中标的保证金自动转为价款抵扣；' +
+      '违约的按处罚规则划扣或没收。全部以流水（DepositTxn）记录，可在「我的 - 保证金」逐笔查看。'],
+    ['为什么我报名失败？',
+      '报名要过 <b>7 步校验链</b>：主体状态、黑名单（含关联方级联）、限制期、资质、租户关系、金额上限、重复报名。' +
+      '报名页会逐项列出通过与不通过的原因，并<b>按失败项给出对应入口</b>：缺资质 → 我的认证；' +
+      '缺租户关系 / 超额度 → 参拍资格；名单与限制期不可自助办理，页面会说明范围与解除条件。'],
+    ['提示「缺少生效的租户关系」或「起拍价超过上限」怎么办？',
+      '这两项都在「我的 - <b>参拍资格</b>」页处理。<br>' +
+      '<b>缺少生效租户关系</b>：说明该「处置单位 × 品类」还没有给你开通参拍资格，需在参拍资格页发起' +
+      '「品类准入」申请（选申报品类与属地），提交后进入后台准入审核，审核通过后系统自动生成租户关系，' +
+      '无需人工建账，随后即可报名。<br>' +
+      '<b>起拍价超过上限</b>：上限取「主体级（由分级决定）」与「租户级（属地内 100% / 跨区 60%）」的更严者。' +
+      '可在参拍资格页发起「额度调整」申请（期望额度须高于当前上限），审核通过后主体级额度与全部生效租户关系的' +
+      '额度上限同步调整；也可以直接改选起拍价落在额度内的资产，无需申请。<br>' +
+      '<b>申请期间不影响</b>既有品类参拍，已成交订单的履约也不受影响。'],
+    ['什么是保留价？我能看到吗？',
+      '<b>不能。</b>保留价是委托方的底价，<b>不对外展示</b>。竞价结束时系统用「最高出价 ≥ 保留价」判定是否成交：' +
+      '未达保留价即流拍，最高出价不产生成交效力。'],
+    ['出价后可以撤销吗？',
+      '<b>不可以。</b>出价即为<b>不可撤销要约</b>。每次出价都会记录 IP、设备指纹与签名（SHA256），写入后不可修改、不可删除。'],
+    ['竞价最后 2 分钟有人出价会怎样？',
+      '会触发<b>延时</b>：竞价结束时间自动顺延（标准资产 120 秒 / 高价值资产 180 秒），' +
+      '延时次数与频率限制以该场次命中的「竞价规则」为准，规则卡上会显示当前生效版本。'],
+    ['成交后多久要签合同、付款、提货？',
+      '<b>48 小时</b>内签署合同，<b>7 日</b>内付清价款，<b>30 日</b>内完成交割提货。' +
+      '任一节点逾期都会触发违约认定（BT01 / BT02 / BT03），并可能划扣保证金、降低分级、列入名单。'],
+    ['资质快到期了会怎样？',
+      '资质到期前 <b>30 天</b>会提醒更新。资质过期后无法报名<b>该类</b>资产，' +
+      '<b>不影响</b>已成交订单的履约。可在「我的 - 认证」上传续期材料。'],
+    ['信用分和分级有什么区别？',
+      '两套口径，<b>不互相赋值</b>。信用分（基准 600 分，分 优/良/中/差）由履约、违约、异常行为加减得出；' +
+      '分级（A/B/C）由信用等级 + 履约率 + 资质齐全度 + 累计成交额综合判定，直接影响保证金比例。'],
+    ['被列入黑名单会怎样？',
+      '观察名单仅提示；限制名单在限制范围（品类/区域）内不可报名；禁入名单全平台不可参与，' +
+      '且会<b>级联到关联方</b>。认定权在业务侧，系统只输出「疑似」与建议，全部结论可回溯源记录。'],
+    ['为什么推荐里看不到某个资产？',
+      '推荐会排除：禁入名单、限制范围内的品类、处于限制期、缺少必需资质、已报名的资产，' +
+      '以及你标记过「不感兴趣」的品类（30 天内有效）。'],
+    ['看样预约了没去会怎样？',
+      '预约确认后未到场且未取消，累计 <b>2 次</b>触发 BT08（看样爽约），扣减信用分 20 分并列入观察名单。' +
+      '如需取消请提前 <b>24 小时</b>操作。'],
+    ['保证金可以用对公转账吗？到账要多久？',
+      '可以。对公转账需上传付款凭证，以<b>银行到账时间</b>为准；银企直连为实时到账。' +
+      '请在备注中填写报名编号，未按时缴纳（报名截止前）报名记录将置为「失效」。']
+  ];
+
+  /* ---------- 规则组 ---------- */
+  function ruleGroups() {
+    return [
+      {
+        k: 'bid', ic: '🔨', t: '竞价规则', s: rulesOf('BiddingRule').length + ' 条生效',
+        body: function () {
+          var rs = rulesOf('BiddingRule');
+          if (!rs.length) return emptyIn('暂无生效的竞价规则');
+          return rs.map(function (r) {
+            return '<div class="card flat" style="margin-bottom:8px"><div class="ch"><h3>' + X.esc(r.code) + ' · ' + X.esc(r.name) + '</h3>' +
+              '<span class="sub">' + APP.tag(r.version, 'info') + '</span></div><div class="cb">' +
+              APP.kvRows([
+                ['竞价方式', X.esc(r.bid_mode), 'left'],
+                ['起价方式', X.esc(r.start_mode), 'left'],
+                ['加价方式', X.esc(r.step_mode), 'left'],
+                ['延时窗口', r.delay_seconds ? r.delay_seconds + ' 秒' : '不延时', 'left'],
+                ['最大延时次数', String(r.max_delay_times || 0), 'left'],
+                ['出价频率限制', r.bid_rate_limit ? r.bid_rate_limit + ' 秒/次' : '不限', 'left'],
+                ['需缴保证金', r.need_deposit ? '是' : '否', 'left'],
+                ['适用范围', X.esc(r.apply_scope || '—'), 'left']
+              ]) + '</div></div>';
+          }).join('') +
+          '<div class="note gray"><span class="ni">ⓘ</span><div>规则带版本号。场次开拍时会<b>快照</b>命中的规则版本，' +
+          '竞价过程中规则变更<b>不影响</b>已开始场次，可在竞价页「规则快照」查看本场次适用的版本。</div></div>';
+        }
+      },
+      {
+        k: 'deposit', ic: '💰', t: '保证金规则', s: rulesOf('DepositRule').length + ' 档',
+        body: function () {
+          var rs = rulesOf('DepositRule');
+          return '<div class="list">' + rs.map(function (r) {
+            return '<div class="li"><span style="font-size:16px">' +
+              (r.apply_grade === '全部' ? '★' : r.apply_grade) + '</span>' +
+              '<div class="li-main"><div class="li-t">' + X.esc(r.name) + '</div>' +
+              '<div class="li-s">' + X.esc(r.code) + ' · ' + X.esc(r.version) +
+              ' · 区间 ' + (r.price_min ? X.w(r.price_min) + '万' : '0') + ' ~ ' + (r.price_max ? X.w(r.price_max) + '万' : '不限') + '</div></div>' +
+              '<div class="li-r"><div class="bold c-pri">' + (r.ratio * 100).toFixed(1) + '%</div>' +
+              '<div class="xs muted">封顶 ' + X.w(r.max_amount) + '万</div></div></div>';
+          }).join('') + '</div>' +
+          '<div class="note" style="margin-top:9px"><span class="ni">ⓘ</span><div>' +
+          '保证金 = ROUND(起拍价 × 比例, 千元)，比例按<b>竞买人分级 + 起拍价档位</b>匹配：' +
+          '起拍价 &lt;2000 万按分级比例（A 8% / B 10% / C 15%），≥2000 万统一 5%（高价值档）。' +
+          '档位区间为<b>左闭右开</b>，2000 万恰好归入高价值档。</div></div>';
+        }
+      },
+      {
+        k: 'commission', ic: '🧾', t: '佣金与税费', s: rulesOf('CommissionRule').length + ' 个品类',
+        body: function () {
+          var rs = rulesOf('CommissionRule');
+          return '<div class="list">' + rs.map(function (r) {
+            return '<div class="li"><div class="li-main"><div class="li-t">' + X.esc(r.category) + '</div>' +
+              '<div class="li-s">' + X.esc(r.code) + ' · ' + X.esc(r.version) + '</div></div>' +
+              '<div class="li-r bold c-pri">' + (r.rate * 100).toFixed(1) + '%</div></div>';
+          }).join('') + '</div>' +
+          '<div class="note" style="margin-top:9px"><span class="ni">ⓘ</span><div>' +
+          '应付总额 = 成交价 + 佣金（成交价 × 品类费率）+ 税费 − 保证金抵扣。' +
+          '税费按品类适用税率计算（成品油 13%，其余 6%）。详见「成交结果」页的应付金额明细。</div></div>';
+        }
+      },
+      {
+        k: 'credit', ic: '📊', t: '信用分与分级', s: '基准 600 分',
+        body: function () {
+          var r = rulesOf('CreditScoreRule')[0];
+          if (!r) return emptyIn('暂无生效的信用分规则');
+          var add = r.add_items || {}, ded = r.deduct_items || {};
+          return APP.kvRows([['规则编号', X.esc(r.code), 'left'], ['版本', X.esc(r.version), 'left'],
+            ['基准分', String(r.base_score), 'left'], ['重算周期', X.esc(r.recalc_cycle), 'left']]) +
+            '<div style="margin-top:9px"><div class="xs muted" style="margin-bottom:5px">加分项</div>' +
+            Object.keys(add).map(function (k) {
+              return '<div class="kv-row"><div class="k">' + X.esc(k) + '</div><div class="v c-ok">+' + add[k] + '</div></div>';
+            }).join('') + '</div>' +
+            '<div style="margin-top:9px"><div class="xs muted" style="margin-bottom:5px">扣分项</div>' +
+            Object.keys(ded).map(function (k) {
+              return '<div class="kv-row"><div class="k">' + X.esc(k) + '</div><div class="v c-danger">−' + ded[k] + '</div></div>';
+            }).join('') + '</div>' +
+            '<div style="margin-top:9px"><div class="xs muted" style="margin-bottom:5px">等级映射</div>' +
+            Object.keys(r.level_map || {}).map(function (k) {
+              return '<div class="kv-row"><div class="k">' + X.esc(k) + '</div><div class="v">' + X.esc(r.level_map[k]) + '</div></div>';
+            }).join('') + '</div>' +
+            '<div class="note warn" style="margin-top:9px"><span class="ni">⚠</span><div>' +
+            '信用分与分级是<b>两套口径，禁止互相赋值</b>。分级由信用等级 + 履约率 + 资质齐全度 + 累计成交额判定，' +
+            '直接决定保证金比例与可参与范围。</div></div>';
+        }
+      },
+      {
+        k: 'breach', ic: '⚠️', t: '违约认定与处罚', s: rulesOf('BreachRule').length + ' 类',
+        body: function () {
+          var brs = rulesOf('BreachRule'), prs = rulesOf('PenaltyRule');
+          return '<div class="list">' + brs.map(function (b) {
+            var pr = prs.filter(function (p) { return p.breach_type === b.breach_type; })[0];
+            var a = pr ? (pr.actions || {}) : {};
+            return '<div class="li"><span style="font-size:16px">' + (b.auto_trigger ? '⚡' : '✋') + '</span>' +
+              '<div class="li-main"><div class="li-t">' + X.esc(b.code) + ' ' + X.esc(b.name) + ' ' +
+              APP.tag((b.severity_map || {}).default || '—', 'warn') + '</div>' +
+              '<div class="li-s">触发条件：' + X.esc(b.condition_expr) + '<br>' +
+              '措施：' + (a.depositForfeit ? '划扣保证金 ' + Math.round(a.depositForfeit * 100) + '%' : '不划扣') +
+              (a.restrictMonths ? ' · 限制期 ' + a.restrictMonths + ' 个月' : '') +
+              (a.blacklist ? ' · 列入' + a.blacklist : '') +
+              (a.creditDeduct ? ' · 扣信用分 ' + a.creditDeduct : '') +
+              ' · 审批 ' + X.esc(pr ? pr.approve_level : '—') + '</div></div>' +
+              '<span class="arrow">›</span></div>';
+          }).join('') + '</div>' +
+          '<div class="note danger" style="margin-top:9px"><span class="ni">⚠</span><div>' +
+          '处罚执行是<b>事务化动作</b>：保证金划扣、限制期、分级降级、名单、信用分、画像六项<b>全成功或全回滚</b>，' +
+          '不会出现「扣了钱没进名单」的中间态。认定权在业务侧，系统只输出「疑似」与建议，全部结论可回溯源记录。</div></div>';
+        }
+      }
+    ];
+  }
+  function emptyIn(t) { return '<div class="empty" style="padding:22px 10px"><div class="et">' + X.esc(t) + '</div></div>'; }
+
+  function openRuleGroup(g) {
+    APP.sheet({ title: g.t, body: g.body() });
+  }
+
+  /* ---------- 竞买须知 ---------- */
+  var NOTICE = [
+    '竞买人须为依法设立并有效存续的法人或非法人组织，具备完全民事行为能力与相应经营资质。',
+    '报名前须完成企业实名认证与准入审核；部分资产须具备特定资质（如危化品经营许可证）方可报名。',
+    '标的物<b>以现状处置</b>，不保证质量与完整性。竞买人应在报名截止前完成现场看样，未看样视为接受现状。',
+    '出价为<b>不可撤销要约</b>，一经提交不可修改或撤回，并记录 IP、设备指纹与签名。',
+    '竞价结束前 2 分钟内出价将触发<b>延时</b>，具体延时窗口与次数以该场次命中的竞价规则为准。',
+    '成交后须在 <b>48 小时</b>内签署合同、<b>7 日</b>内付清价款、<b>30 日</b>内完成交割提货，任一节点逾期视为违约。',
+    '保留价为委托方底价，<b>不对外展示</b>；最高出价未达保留价的，场次流拍，出价不产生成交效力。',
+    '严禁围标串标、恶意抬价、虚假资质。经认定将划扣保证金、列入名单并级联关联方。'
+  ];
+
+  /* ---------- 我的工单 ---------- */
+  function ticketCard() {
+    var ts = APP.myTickets().slice().sort(function (a, b) { return String(b.create_time).localeCompare(String(a.create_time)); });
+    return APP.card('我的工单', (ts.length
+      ? '<div class="list">' + ts.map(function (t) {
+          return '<div class="li" data-tkt="' + X.esc(t.ticket_id) + '">' +
+            '<span style="font-size:17px">' + (t.status === '已回复' ? '✅' : t.status === '处理中' ? '⏳' : '🕐') + '</span>' +
+            '<div class="li-main"><div class="li-t">' + X.esc(t.title) + '</div>' +
+            '<div class="li-s">' + X.esc(t.ticket_id) + ' · ' + X.esc(t.type) + ' · ' + X.esc(t.create_time) + '</div></div>' +
+            '<div class="li-r">' + APP.tag(t.status, t.status === '已回复' ? 'ok' : t.status === '处理中' ? 'warn' : 'info') + '</div>' +
+            '<span class="arrow">›</span></div>';
+        }).join('') + '</div>'
+      : emptyIn('暂无工单')) +
+      '<button class="btn pri blk" data-newtkt="1" style="margin-top:10px">＋ 提交新工单</button>' +
+      '<div class="note gray" style="margin-top:9px"><span class="ni">ⓘ</span><div>' +
+      '工单是独立业务对象（Ticket），后台客服在「客服工单」中处理，回复后站内信通知。' +
+      '工单记录<b>不物理删除</b>。</div></div>', APP.myTickets().length + ' 条');
+  }
+
+  function openTicket(id) {
+    var t = DB.get('tickets', id);
+    if (!t) return;
+    APP.sheet({
+      title: t.ticket_id,
+      body: APP.kvRows([['类型', X.esc(t.type), 'left'], ['状态', APP.tag(t.status, t.status === '已回复' ? 'ok' : 'warn'), 'left'],
+        ['提交时间', X.esc(t.create_time), 'left']]) +
+        '<div style="margin-top:10px"><div class="xs muted">问题描述</div>' +
+        '<div style="margin-top:4px">' + X.esc(t.content) + '</div></div>' +
+        (t.reply ? '<div class="note ok" style="margin-top:10px"><span class="ni">✅</span><div>' +
+          '<b>客服回复</b>（' + X.esc(t.reply_time || '') + '）<br>' + X.esc(t.reply) + '</div></div>'
+          : '<div class="note" style="margin-top:10px"><span class="ni">⏳</span><div>客服处理中，通常在 1 个工作日内回复。</div></div>')
+    });
+  }
+
+  function openNewTicket() {
+    var TYPES = ['保证金退还', '资质变更', '报名异常', '出价异常', '交割争议', '发票问题', '其他'];
+    APP.sheet({
+      title: '提交新工单',
+      body:
+        '<div class="fld"><label>问题类型<span class="req">*</span></label>' +
+        '<div class="chips" id="tktType">' + TYPES.map(function (t, i) {
+          return '<button data-tt="' + X.esc(t) + '" class="' + (i === 0 ? 'on' : '') + '">' + X.esc(t) + '</button>';
+        }).join('') + '</div></div>' +
+        '<div class="fld"><label>标题<span class="req">*</span></label>' +
+        '<input id="tktTitle" maxlength="40" placeholder="一句话描述问题，如「流拍场次保证金退还时间咨询」"></div>' +
+        '<div class="fld"><label>详细描述<span class="req">*</span></label>' +
+        '<textarea id="tktDesc" rows="4" placeholder="请说明涉及的单据号（报名编号 / 订单号 / 流水号）与具体情况"></textarea>' +
+        '<div class="help">涉及具体单据的请填写单据号，便于客服直接定位。</div></div>' +
+        '<div class="note"><span class="ni">ⓘ</span><div>提交后生成工单编号并进入客服队列，回复将通过站内信通知。</div></div>',
+      foot: '<button class="btn grow" data-close="1">取消</button><button class="btn pri grow" data-tktsubmit="1">提交工单</button>',
+      onReady: function (w) {
+        var type = TYPES[0];
+        w.querySelectorAll('[data-tt]').forEach(function (b) {
+          b.onclick = function () {
+            type = b.getAttribute('data-tt');
+            w.querySelectorAll('[data-tt]').forEach(function (o) { o.classList.remove('on'); });
+            b.classList.add('on');
+          };
+        });
+        w.querySelector('[data-tktsubmit]').onclick = function () {
+          var title = (w.querySelector('#tktTitle').value || '').trim();
+          var desc = (w.querySelector('#tktDesc').value || '').trim();
+          if (title.length < 4) { APP.toast('标题至少 4 个字', 'err'); return; }
+          if (desc.length < 6) { APP.toast('详细描述至少 6 个字', 'err'); return; }
+          var rec = DB.insert('tickets', {
+            ticket_id: 'TKT-' + String(DB.all('tickets').length + 1).padStart(4, '0'),
+            subject_id: me.subject_id, type: type, title: title, content: desc,
+            status: '待处理', reply: '', create_time: '2026-10-09 ' + WB.nowHM(), reply_time: null
+          });
+          DB.audit('工单提交', rec.ticket_id, 'APP 端提交工单「' + title + '」（类型 ' + type + '）', { level: '一般', role: '竞买人' });
+          w.remove();
+          render();
+          APP.toast('工单已提交 ' + rec.ticket_id + '，客服将尽快回复', 'ok');
+        };
+      }
+    });
+  }
+
+  /* ---------- 在线客服 ---------- */
+  function openService() {
+    APP.sheet({
+      title: '在线客服',
+      body:
+        '<div class="card flat" style="margin-bottom:10px"><div class="cb" style="display:flex;align-items:center;gap:11px">' +
+        '<div class="avatar">客</div><div style="flex:1"><div class="bold">易拍客客服中心</div>' +
+        '<div class="xs muted">服务时间 工作日 08:30 - 17:30</div></div>' +
+        APP.tag('在线', 'ok') + '</div></div>' +
+        APP.kvRows([
+          ['客服热线', '400-000-0000（转 2）', 'left'],
+          ['企业微信', '中油易拍客客服', 'left'],
+          ['服务邮箱', 'service@zyypk.example', 'left'],
+          ['响应时限', '工单 1 个工作日内回复', 'left']
+        ]) +
+        '<div class="note warn" style="margin-top:10px"><span class="ni">⚠</span><div>' +
+        '为保护双方权益，<b>所有沟通记录须以工单形式留痕</b>。电话/微信沟通的结论请补录为工单，' +
+        '以便后续追溯（系统内不提供不落痕的私聊）。</div></div>',
+      foot: '<button class="btn grow" data-close="1">关闭</button>' +
+        '<button class="btn pri grow" data-tonewtkt="1">转为工单</button>',
+      onReady: function (w) {
+        w.querySelector('[data-tonewtkt]').onclick = function () { w.remove(); openNewTicket(); };
+      }
+    });
+  }
+
+  /* ---------- 页面 ---------- */
+  function bodyHTML() {
+    var groups = ruleGroups();
+    var k = kw.trim();
+    var faqs = k ? FAQ.filter(function (f) { return (f[0] + f[1]).indexOf(k) >= 0; }) : FAQ;
+    var gs = k ? groups.filter(function (g) { return g.t.indexOf(k) >= 0; }) : groups;
+
+    return '<div class="fld" style="margin-bottom:12px">' +
+      '<input id="kw" placeholder="搜索问题，如「保证金」「保留价」「违约」" value="' + X.esc(kw) + '"></div>' +
+
+      (k ? '<div class="note" style="margin-bottom:10px"><span class="ni">🔍</span><div>' +
+        '「' + X.esc(k) + '」匹配到 <b>' + faqs.length + '</b> 条常见问题、<b>' + gs.length + '</b> 个规则分类</div></div>'
+        : '') +
+
+      APP.card('竞买流程', '<div class="steps">' +
+        ['注册认证', '浏览看样', '报名缴纳', '竞价出价', '签约交割'].map(function (t, i) {
+          return '<div class="s' + (i === 0 ? ' done' : '') + '">' + t + '</div>';
+        }).join('') + '</div>' +
+        '<div class="note" style="margin-top:10px"><span class="ni">ⓘ</span><div>' +
+        '① 企业实名认证 → 准入审核（资质 + 租户关系）；② 浏览资产、预约看样（必看瑕疵说明与竞买须知）；' +
+        '③ 报名（7 步校验链）→ 缴纳保证金；④ 竞价出价（不可撤销要约）；⑤ 签署合同 → 支付价款 → 交割提货。</div></div>') +
+
+      '<div class="card"><div class="ch"><h3>规则口径</h3><span class="sub">与后台同一批规则记录</span></div>' +
+      '<div class="cb tight"><div class="list">' + gs.map(function (g) {
+        return '<div class="li" data-rg="' + g.k + '"><span style="font-size:17px">' + g.ic + '</span>' +
+          '<div class="li-main"><div class="li-t">' + X.esc(g.t) + '</div>' +
+          '<div class="li-s">' + X.esc(g.s) + '</div></div><span class="arrow">›</span></div>';
+      }).join('') + '</div></div></div>' +
+
+      '<div class="card"><div class="ch"><h3>竞买须知</h3><span class="sub">' + NOTICE.length + ' 条</span></div>' +
+      '<div class="cb">' + NOTICE.map(function (t, i) {
+        return '<div style="display:flex;gap:8px;padding:6px 0;font-size:12.5px;line-height:1.65">' +
+          '<span class="muted" style="flex:none">' + (i + 1) + '.</span><div>' + t + '</div></div>';
+      }).join('') + '</div></div>' +
+
+      '<div class="card"><div class="ch"><h3>常见问题</h3><span class="sub">' + faqs.length + ' 条</span></div>' +
+      '<div class="cb tight">' + (faqs.length
+        ? '<div class="list">' + faqs.map(function (f, i) {
+            var open = !!openFaq[f[0]];
+            return '<div class="li" style="flex-direction:column;align-items:stretch" data-faq="' + i + '">' +
+              '<div style="display:flex;align-items:center;gap:8px">' +
+              '<div class="li-main"><div class="li-t">' + X.esc(f[0]) + '</div></div>' +
+              '<span class="arrow" style="transform:rotate(' + (open ? '90' : '0') + 'deg)">›</span></div>' +
+              (open ? '<div style="font-size:12.5px;color:var(--ink2);line-height:1.7;margin-top:7px;padding-top:8px;border-top:1px dashed var(--line)">' +
+                f[1] + '</div>' : '') + '</div>';
+          }).join('') + '</div>'
+        : emptyIn('没有匹配的问题，试试提交工单')) + '</div></div>' +
+
+      ticketCard() +
+
+      '<div class="card"><div class="ch"><h3>联系我们</h3></div><div class="cb">' +
+      '<button class="btn pri blk lg" data-svc="1">💬 联系在线客服</button>' +
+      '<div style="height:8px"></div>' +
+      '<button class="btn blk" data-newtkt2="1">📝 提交工单</button>' +
+      '</div></div>' +
+
+      '<div class="note gray" style="margin-top:10px"><span class="ni">📌</span><div>' +
+      '本页规则口径<b>直接读取后台规则库</b>（BiddingRule / DepositRule / CommissionRule / CreditScoreRule / BreachRule），' +
+      '规则更新后此处同步变化，不做二次维护。</div></div>' +
+
+      '<div style="height:6px"></div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({ title: '帮助与客服', tab: 'mine', sideActive: '帮助与客服', body: bodyHTML() }));
+    bind();
+  }
+
+  function bind() {
+    var groups = ruleGroups();
+    var k = kw.trim();
+    var faqs = k ? FAQ.filter(function (f) { return (f[0] + f[1]).indexOf(k) >= 0; }) : FAQ;
+
+    var inp = document.getElementById('kw');
+    if (inp) {
+      inp.oninput = function () { kw = inp.value; };
+      inp.onchange = function () { kw = inp.value; render(); var n = document.getElementById('kw'); if (n) { n.focus(); } };
+      inp.onkeydown = function (e) { if (e.key === 'Enter') { kw = inp.value; render(); } };
+    }
+
+    document.querySelectorAll('[data-rg]').forEach(function (b) {
+      b.onclick = function () {
+        var g = groups.filter(function (x) { return x.k === b.getAttribute('data-rg'); })[0];
+        if (g) openRuleGroup(g);
+      };
+    });
+
+    document.querySelectorAll('[data-faq]').forEach(function (b) {
+      b.onclick = function () {
+        var f = faqs[Number(b.getAttribute('data-faq'))];
+        if (!f) return;
+        openFaq[f[0]] = !openFaq[f[0]];
+        render();
+      };
+    });
+
+    document.querySelectorAll('[data-tkt]').forEach(function (b) {
+      b.onclick = function () { openTicket(b.getAttribute('data-tkt')); };
+    });
+    document.querySelectorAll('[data-newtkt],[data-newtkt2]').forEach(function (b) {
+      b.onclick = function () { openNewTicket(); };
+    });
+    document.querySelectorAll('[data-svc]').forEach(function (b) {
+      b.onclick = function () { openService(); };
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

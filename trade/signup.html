@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>报名 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var asset = DB.get('assets', qs.get('id')) || DB.all('assets')[0];
+  var ses = DB.find('sessions', function (s) { return s.asset_id === asset.asset_id && s.status !== '已终止'; });
+  var dp = E.depositPlan(me, asset.start_price);
+  var check = E.registrationCheck(me, asset);
+  var failed = check.filter(function (c) { return !c.pass; });
+  var exist = DB.find('bidRegs', function (r) { return r.asset_id === asset.asset_id && r.subject_id === me.subject_id && r.status !== '已取消'; });
+
+  var agreed = false, signName = me.legal_person || me.contact_name || '';
+  var STAGE = 'idle';   // idle | checking | done
+
+  function chainHTML(running) {
+    return '<div class="checks">' + check.map(function (c, i) {
+      var state = c.pass ? 'ok' : 'no';
+      if (running && i > 2) state = '';
+      return '<div class="ck ' + state + '"><div class="ci">' + (c.pass ? '✓' : '!') + '</div>' +
+        '<div class="cm"><div class="ct">' + c.n + '. ' + X.esc(c.name) + '</div>' +
+        '<div class="cd">' + X.esc(c.detail) + '</div>' +
+        '<div class="xs muted" style="margin-top:2px">规则：' + X.esc(c.rule) + '</div>' +
+        (!c.pass ? fixHTML(c) : '') +
+        '</div></div>';
+    }).join('') + '</div>';
+  }
+
+  /* 未通过项 → 对应补救入口。必须按失败项分别指向对应页面：
+     把 7 步失败统一指向「去补充认证」会让第 5 步（租户关系）与第 6 步（金额上限）
+     变成死路 —— 认证页只能补资质，根本无法发起参拍资格申请。
+     第 2/3 步（名单 / 限制期）不可自助办理，只说明原因与解除条件。 */
+  function fixHTML(c) {
+    var f = APP.checkFix(c);
+    if (!f) return '';
+    return '<div class="xs muted" style="margin-top:5px">' + X.esc(f.tip) + '</div>' +
+      '<button class="btn sm line-pri" style="margin-top:5px" data-go="' + X.esc(f.href) + '">' +
+      X.esc(f.label) + ' ›</button>';
+  }
+
+  /* 弹层底部：按失败项去重后给出「去处理」按钮（同一入口只出一个按钮） */
+  function fixFoot() {
+    var seen = {}, btns = [];
+    failed.forEach(function (c) {
+      var f = APP.checkFix(c);
+      if (!f || seen[f.href]) return;
+      seen[f.href] = 1;
+      btns.push('<button class="btn pri grow" data-go="' + X.esc(f.href) + '">' + X.esc(f.label) + '</button>');
+    });
+    return '<button class="btn' + (btns.length ? '' : ' pri') + ' grow" data-close="1">知道了</button>' +
+      btns.slice(0, 2).join('');
+  }
+
+  function bodyHTML() {
+    if (exist) {
+      return doneHTML(exist);
+    }
+    return APP.card('报名标的', APP.kvRows([
+      ['资产名称', '<b>' + X.esc(asset.asset_name) + '</b>', 'left'],
+      ['场次', X.esc(ses ? ses.session_id + ' · ' + ses.session_name : '—'), 'left'],
+      ['报名截止', '<b class="c-danger">' + X.esc(ses ? X.fmtDT(ses.reg_end) : '—') + '</b>'],
+      ['起拍价', '<span class="price mid">' + X.w(asset.start_price) + '<span class="u">万</span></span>']
+    ])) +
+    APP.card('报名主体', '<div style="display:flex;gap:10px;align-items:center">' +
+      '<div class="avatar">' + X.esc(String(me.subject_name).slice(0, 1)) + '</div>' +
+      '<div style="flex:1"><div class="bold">' + X.esc(me.subject_name) + '</div>' +
+      '<div class="xs muted">统一社会信用代码 ' + X.esc(me.uscc) + '</div>' +
+      '<div style="margin-top:3px">' + APP.tag(me.status, me.status === '已准入' ? 'ok' : 'warn') +
+      APP.tag(me.grade + ' 级', 'info') + APP.tag('信用 ' + me.credit_level, 'pri') + '</div></div>' +
+      '<button class="btn sm ghost" data-go="mine/cert.html">认证信息</button></div>') +
+    APP.card('报名校验链（7 步，按序执行）', '<div class="small muted" style="margin-bottom:8px">任一步失败即拦截报名。失败项会说明「缺什么」与「怎么补」。</div>' + chainHTML(false),
+      failed.length ? APP.tag(failed.length + ' 项未通过', 'danger') : APP.tag('全部通过', 'ok')) +
+    APP.card('应付保证金', APP.kvRows([
+      ['测算规则', X.esc(dp.ruleCode) + ' ' + X.esc(dp.ruleVersion) + ' ' + X.esc(dp.ruleName)],
+      ['比例', X.pct(dp.ratio) + (dp.clamped ? '（已' + X.esc(dp.clamped) + '）' : '')],
+      ['应付金额', '<b class="price mid">¥' + X.yuan(dp.amount) + '</b>']
+    ]) + '<div class="xs muted">保证金将在报名成功后缴纳，缴纳截止时间 <b class="c-danger">' +
+      X.esc(ses ? X.fmtDT(ses.reg_end) : '—') + '</b>。未按时缴纳，报名记录将置为「失效」。</div>') +
+    APP.card('竞买协议（电子签）', '<div id="agreeBox" style="max-height:110px;overflow-y:auto;font-size:12.5px;color:var(--ink2);border:1px solid var(--line);border-radius:9px;padding:10px;line-height:1.75" onscroll="window.__agreeScroll&&window.__agreeScroll(this)">' +
+      '<b>竞买协议</b><br>甲方（处置方）：' + X.esc(asset.disposal_org) + '<br>乙方（竞买人）：' + X.esc(me.subject_name) + '<br><br>' +
+      '一、乙方已充分了解标的物现状与全部瑕疵，自愿参与本次竞价。<br>' +
+      '二、乙方承诺所提交的资质文件真实、合法、有效，如有虚假愿承担全部法律责任。<br>' +
+      '三、乙方出价即构成不可撤销要约，竞得后须在 48 小时内签署合同、7 日内付清全部价款。<br>' +
+      '四、乙方逾期未签约或未付款，甲方有权没收保证金，并按规定列入名单、下调信用分与主体分级。<br>' +
+      '五、本次竞价以服务端时间为准，出价记录只增不改、全程可审计。<br>' +
+      '六、本协议经双方电子签章后生效，与纸质合同具有同等法律效力。' +
+      '</div>' +
+      '<div class="xs muted" id="agreeTip" style="margin-top:6px">↓ 请向下滑动阅读协议全文</div>' +
+      '<div class="fld" style="margin-top:10px"><label>签署人姓名<span class="req">*</span></label>' +
+      '<input id="signName" value="' + X.esc(signName) + '" placeholder="法定代表人 / 授权代表"></div>' +
+      '<label style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px;margin-top:6px">' +
+      '<input type="checkbox" id="agreeChk" disabled style="width:auto;margin-top:3px">' +
+      '<span>我已完整阅读并同意《竞买协议》全部条款，愿承担相应法律责任。<span class="muted">（须阅读至底部后勾选）</span></span></label>');
+  }
+
+  function doneHTML(reg) {
+    var txn = reg.deposit_txn_id ? DB.get('depositTxns', reg.deposit_txn_id) : null;
+    return '<div class="card"><div class="cb center" style="padding:22px 14px">' +
+      '<div style="font-size:44px">✅</div>' +
+      '<div class="bold" style="font-size:17px;margin-top:8px">报名成功</div>' +
+      '<div class="xs muted" style="margin-top:4px">报名编号 ' + X.esc(reg.reg_id) + '</div>' +
+      '</div></div>' +
+      APP.card('报名信息', APP.kvRows([
+        ['资产', X.esc(asset.asset_name), 'left'],
+        ['场次', X.esc(ses ? ses.session_id : '—')],
+        ['报名时间', X.esc(reg.reg_time)],
+        ['报名渠道', X.esc(reg.channel)],
+        ['状态', APP.tag(reg.status, reg.status === '已报名' ? 'ok' : 'warn')]
+      ])) +
+      APP.card('保证金缴纳', APP.kvRows([
+        ['应付金额', '<b class="price mid">¥' + X.yuan(reg.deposit_amount) + '</b>'],
+        ['缴纳状态', txn ? APP.tag(txn.status, 'ok') : APP.tag('待缴纳', 'warn')],
+        ['缴纳截止', '<b class="c-danger">' + X.esc(ses ? X.fmtDT(ses.reg_end) : '—') + '</b>'],
+        ['缴纳流水', txn ? '<span class="mono">' + X.esc(txn.txn_id) + '</span>' : '—']
+      ]) + (txn ? '' : '<button class="btn pri blk" data-go="trade/deposit.html?reg=' + reg.reg_id + '">立即缴纳保证金</button>')) +
+      APP.card('下一步', '<div class="list">' +
+        '<a class="li" data-go="trade/deposit.html?reg=' + reg.reg_id + '"><div class="li-main"><div class="li-t">① 缴纳保证金</div>' +
+        '<div class="li-s">缴纳后报名记录转为「有效」，方可参与出价</div></div><span class="arrow">›</span></a>' +
+        '<a class="li" data-go="trade/bidding.html?ses=' + (ses ? ses.session_id : '') + '"><div class="li-main"><div class="li-t">② 进入竞价</div>' +
+        '<div class="li-s">竞拍开始后即可出价，请留意倒计时</div></div><span class="arrow">›</span></a>' +
+        '<a class="li" data-go="asset/inspect.html?id=' + asset.asset_id + '"><div class="li-main"><div class="li-t">③ 预约现场看样</div>' +
+        '<div class="li-s">建议看样后再出价，避免瑕疵争议</div></div><span class="arrow">›</span></a>' +
+        '</div>') +
+      '<div class="note ok"><span class="ni">✓</span><div>报名已产生<b>兴趣事实</b>（InterestFact：报名），用于后续推荐与客群圈选；该事实独立于「是否收藏」，不会被取消收藏影响。</div></div>';
+  }
+
+  function barHTML() {
+    if (exist) {
+      return '<div class="actionbar">' +
+        '<button class="btn lg grow" data-go="trade/bidding.html?ses=' + (ses ? ses.session_id : '') + '">去竞价</button>' +
+        '<button class="btn pri lg grow" data-go="trade/deposit.html?reg=' + exist.reg_id + '">缴纳保证金</button></div>';
+    }
+    return '<div class="actionbar">' +
+      '<button class="btn lg grow" data-go="asset/detail.html?id=' + asset.asset_id + '">返回</button>' +
+      '<button class="btn pri lg grow' + (failed.length ? ' dis' : '') + '" id="submit">' +
+      (failed.length ? '校验未通过（' + failed.length + ' 项）' : STAGE === 'checking' ? '校验中…' : '提交报名') + '</button></div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '报名', backTo: 'back', sideActive: '报名（校验链）',
+      body: bodyHTML() + '<div style="height:8px"></div>', bar: barHTML()
+    }));
+    bind();
+  }
+
+  function bind() {
+    /* 协议滚动到底 → 解锁勾选 */
+    window.__agreeScroll = function (el) {
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 6) {
+        var ck = document.getElementById('agreeChk');
+        var tip = document.getElementById('agreeTip');
+        if (ck && ck.disabled) {
+          ck.disabled = false;
+          if (tip) { tip.className = 'xs c-ok'; tip.textContent = '✓ 已阅读完整协议，现在可以勾选'; }
+        }
+      }
+    };
+    setTimeout(function () {
+      var el = document.getElementById('agreeBox');
+      if (el && el.scrollHeight <= el.clientHeight + 6) window.__agreeScroll(el);
+    }, 60);
+    var ck = document.getElementById('agreeChk');
+    if (ck) ck.onchange = function () { agreed = ck.checked; };
+    var sn = document.getElementById('signName');
+    if (sn) sn.oninput = function () { signName = sn.value; };
+
+    var sb = document.getElementById('submit');
+    if (sb) sb.onclick = function () {
+      if (failed.length) {
+        APP.sheet({
+          title: '报名校验未通过',
+          body: '<div class="note danger"><span class="ni">!</span><div>请先处理以下 ' + failed.length + ' 项后再提交：</div></div>' +
+            '<div class="checks" style="margin-top:10px">' + failed.map(function (c) {
+              return '<div class="ck no"><div class="ci">' + c.n + '</div><div class="cm">' +
+                '<div class="ct">' + X.esc(c.name) + '</div><div class="cd">' + X.esc(c.detail) + '</div></div></div>';
+            }).join('') + '</div>',
+          foot: fixFoot()
+        });
+        return;
+      }
+      if (!agreed) { APP.toast('请先阅读协议并勾选确认', 'err'); return; }
+      if (!signName.trim()) { APP.toast('请填写签署人姓名', 'err'); return; }
+
+      /* 逐阶段 loading，体现「校验中显示阶段提示」 */
+      STAGE = 'checking';
+      APP.sheet({
+        title: '报名校验中', body: '<div class="center" style="padding:14px 0">' +
+          '<div class="skel" style="height:10px;width:70%;margin:0 auto 12px"></div>' +
+          '<div class="small muted">正在按序执行 7 步校验：主体状态 → 黑名单（含关联方）→ 限制期 → 资质 → 租户关系 → 金额上限 → 重复报名</div>' +
+          '</div>'
+      });
+      setTimeout(function () {
+        APP.closeSheets();
+        var regId = 'REG-' + String(DB.all('bidRegs').length + 1).padStart(4, '0');
+        DB.insert('bidRegs', {
+          reg_id: regId, session_id: ses ? ses.session_id : null, asset_id: asset.asset_id,
+          subject_id: me.subject_id, reg_time: '2026-10-09 ' + WB.nowHM(),
+          qual_check: true, deposit_amount: dp.amount, deposit_txn_id: null,
+          status: '已报名', channel: 'APP', cancel_reason: '', create_time: '2026-10-09 ' + WB.nowHM()
+        });
+        /* 报名成功即产生兴趣事实 */
+        DB.insert('interests', {
+          fact_id: 'FCT-' + String(DB.all('interests').length + 1).padStart(4, '0'),
+          subject_id: me.subject_id, act_type: '报名', asset_id: asset.asset_id,
+          category: asset.category, act_time: '2026-10-09', weight: 10, is_valid: true, create_time: '2026-10-09 ' + WB.nowHM()
+        });
+        /* 报名数同步 */
+        if (ses) {
+          var n = DB.all('bidRegs').filter(function (r) { return r.session_id === ses.session_id && r.status !== '已取消'; }).length;
+          DB.update('sessions', ses.session_id, { reg_count: n });
+        }
+        /* 报名是重要业务动作，必须留痕（PRD：全部结论可回溯源记录） */
+        DB.audit('报名', regId, '竞买人 ' + me.subject_name + ' 报名 ' + (ses ? ses.session_id : '—') +
+          '（资产 ' + asset.asset_id + '，7 步校验链全部通过，应付保证金 ¥' + X.yuan(dp.amount) +
+          '，缴纳截止 ' + (ses ? ses.reg_end : '—') + '）', { level: '重要', role: '竞买人' });
+        exist = DB.get('bidRegs', regId);
+        APP.toast('报名成功，请在截止前缴纳保证金', 'ok', 2600);
+        render();
+      }, 900);
+    };
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

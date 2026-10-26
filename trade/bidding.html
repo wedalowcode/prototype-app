@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>竞价 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var ses = DB.get('sessions', qs.get('ses')) ||
+    APP.pickSession(function (s) { return s.status === '竞拍中'; }) ||
+    APP.pickSession(function (s) { return s.status === '报名中' || s.status === '报名截止'; }) ||
+    APP.pickSession();
+  var asset = ses ? DB.get('assets', ses.asset_id) : null;
+  var rule = ses ? DB.get('rules', ses.rule_id) : null;
+  var myReg = ses ? DB.find('bidRegs', function (r) { return r.session_id === ses.session_id && r.subject_id === me.subject_id && r.status !== '已取消'; }) : null;
+
+  /* 服务端时间基准：场次已结束时回拨，使倒计时可演示 */
+  var NOW = APP.serverNowFor(ses);
+  var DEGRADED = false;         /* 降级为只读 + 轮询 */
+  var delayNotice = null;       /* 最近一次延时提示 */
+  var lastSeenPrice = ses ? ses.current_price : 0;
+
+  var bids = ses ? DB.all('bids').filter(function (b) { return b.session_id === ses.session_id; })
+    .sort(function (a, b) { return b.bid_seq - a.bid_seq; }) : [];
+  var regCount = ses ? DB.all('bidRegs').filter(function (r) { return r.session_id === ses.session_id && r.status !== '已取消'; }).length : 0;
+
+  function topBid() { return bids[0] || null; }
+  function iAmTop() { var t = topBid(); return !!(t && t.subject_id === me.subject_id); }
+  function step() { return asset ? asset.min_increment : 10000; }
+  function basePrice() { return ses ? (bids.length ? bids[0].bid_amount : ses.start_price) : 0; }
+
+  /* ---- 顶部竞价区 ---- */
+  function heroHTML() {
+    var t = topBid();
+    var cur = t ? t.bid_amount : (ses ? ses.start_price : 0);
+    var cd = X.countdown(ses ? ses.bid_end : null, NOW);
+    var ended = !ses || ses.status === '已结束' || ses.status === '已归档' || cd.over;
+    return '<div class="bid-hero">' +
+      '<div class="bh-live"><span class="dot"></span>' + (DEGRADED ? '降级模式（只读轮询）' : '实时推送') + '</div>' +
+      '<div class="bh-t">' + (ended ? '最终成交价' : '当前价') + '　' + X.esc(ses ? ses.session_id : '') + '</div>' +
+      '<div class="bh-p">' + X.w(cur) + '<span class="u">万元</span></div>' +
+      '<div class="bh-s">起拍价 ' + X.w(ses ? ses.start_price : 0) + ' 万　加价幅度 ' + X.yuan(step()) + ' 元</div>' +
+      (ended
+        ? '<div class="bh-cd">竞价已结束</div>'
+        : '<div class="bh-cd' + (cd.urgent ? ' urgent' : '') + '">⏱ 距结束 ' + cd.txt + '</div>') +
+      '<div style="margin-top:9px;font-size:12px;opacity:.9">' +
+      (myReg
+        ? (iAmTop() ? '<b>★ 当前您领先</b>' : (t ? '您的出价已被超越，当前价 ¥' + X.yuan(cur) : '您尚未出价'))
+        : '<span>未报名，仅可观看</span>') +
+      '</div>' +
+      (delayNotice ? '<div style="margin-top:8px;background:rgba(255,255,255,.2);border-radius:8px;padding:5px 10px;font-size:12px">' +
+        '⏳ ' + X.esc(delayNotice) + '</div>' : '') +
+      '</div>';
+  }
+
+  function statRow() {
+    return '<div class="grid3" style="margin-bottom:10px">' +
+      '<div class="gcell"><div class="gv">' + bids.length + '</div><div class="gl">出价次数</div></div>' +
+      '<div class="gcell"><div class="gv">' + regCount + '</div><div class="gl">报名人数</div></div>' +
+      '<div class="gcell"><div class="gv">' + X.w((ses ? basePrice() : 0) - (ses ? ses.start_price : 0)) + '</div><div class="gl">溢价（万元）</div></div>' +
+      '</div>';
+  }
+
+  /* ---- 出价按钮区 ---- */
+  function bidPanel() {
+    var ended = !ses || ['已结束', '已归档', '已终止'].indexOf(ses.status) >= 0 || X.countdown(ses.bid_end, NOW).over;
+    var canBid = !!myReg && !ended && !DEGRADED;
+    if (!myReg) {
+      return APP.card('参与竞价', '<div class="note warn"><span class="ni">!</span><div>您尚未报名本场次，无法出价。' +
+        '</div></div><button class="btn pri blk" style="margin-top:9px" data-go="asset/detail.html?id=' +
+        (asset ? asset.asset_id : '') + '">去报名</button>');
+    }
+    if (ended) {
+      return APP.card('竞价已结束', '<div class="note gray"><span class="ni">ⓘ</span><div>本场次已结束，出价通道关闭。' +
+        (ses && ses.meet_reserve ? '最高出价已达保留价，成交结果见下方。' : '') + '</div></div>' +
+        '<button class="btn blk" style="margin-top:9px" data-go="trade/result.html?ses=' + X.esc(ses.session_id) + '">查看成交结果</button>');
+    }
+    if (DEGRADED) {
+      return APP.card('出价通道已降级', '<div class="note danger"><span class="ni">!</span><div>' +
+        '当前服务端压力较大，已降级为<b>只读 + 轮询</b>模式以保证价格正确性优先。出价通道暂时关闭，请稍后重试。</div></div>' +
+        '<button class="btn blk" style="margin-top:9px" id="recover">重试连接</button>');
+    }
+    var b1 = basePrice() + step();
+    var b2 = basePrice() + step() * 2;
+    return APP.card('出价', '<div class="step-btns">' +
+      '<button data-bid="' + b1 + '">+1 档<small>' + X.w(b1) + ' 万</small></button>' +
+      '<button data-bid="' + b2 + '">+2 档<small>' + X.w(b2) + ' 万</small></button>' +
+      '</div>' +
+      '<button class="btn blk" style="margin-top:8px" id="custom">自定义金额</button>' +
+      '<div class="xs muted" style="margin-top:7px">加价幅度 ' + X.yuan(step()) + ' 元；出价即构成不可撤销要约。' +
+      '若因价格已变更导致失败，将提示最新价并支持一键按最新价出价。</div>',
+      '<span class="xs muted">我的出价状态：' + (iAmTop() ? '<b class="c-pri">领先</b>' : '<b class="c-danger">被超越</b>') + '</span>');
+  }
+
+  /* ---- 出价记录（隐去他人身份） ---- */
+  function logHTML() {
+    var list = bids.slice(0, 8);
+    if (!list.length) return APP.card('出价记录', '<div class="empty" style="padding:24px 0"><div class="ei">🔨</div><div class="et">暂无出价记录</div><div class="es">成为第一个出价的人</div></div>');
+    return APP.card('出价记录', '<div class="bid-log">' + list.map(function (b, i) {
+      var mine = b.subject_id === me.subject_id;
+      return '<div class="bl' + (mine ? ' me' : '') + '">' +
+        '<span class="bl-av">' + (mine ? '我' : '竞' + (i + 1)) + '</span>' +
+        '<div class="bl-m"><div>' + (mine ? '<b>我的出价</b>' : '竞买人（身份已隐去）') +
+        (i === 0 ? ' ' + APP.tag('领先', 'pri') : '') + '</div>' +
+        '<div class="xs muted">' + X.esc(b.bid_time) + '　序列 #' + b.bid_seq + '</div></div>' +
+        '<div class="bl-p c-pri">' + X.w(b.bid_amount) + '<span class="xs">万</span></div></div>';
+    }).join('') + '</div>' +
+      '<div class="xs muted" style="margin-top:8px">他人出价身份不可见（隐私合规）；每条出价带服务端时间与签名，只增不改。</div>');
+  }
+
+  /* ---- 规则快照 ---- */
+  function ruleHTML() {
+    if (!rule) return '';
+    return APP.card('竞价规则快照', APP.kvRows([
+      ['规则', X.esc(rule.code) + ' ' + X.esc(rule.name)],
+      ['规则版本', X.esc(rule.version) + '（版本化，历史场次按快照执行）'],
+      ['竞价方式', X.esc(rule.bid_mode) + ' / ' + X.esc(rule.step_mode)],
+      ['延时窗口', X.esc(rule.delay_seconds) + ' 秒'],
+      ['最大延时次数', X.esc(rule.max_delay_times) + ' 次'],
+      ['出价频率限制', X.esc(rule.bid_rate_limit) + ' 次 / 分钟'],
+      ['保证金要求', rule.need_deposit ? '须缴纳（已缴）' : '无需缴纳']
+    ]) + '<div class="note"><span class="ni">ⓘ</span><div>' +
+      '延时规则：距结束 <b>' + X.esc(rule.delay_seconds) + ' 秒</b>内有人出价，结束时间自动延长 ' +
+      X.esc(rule.delay_seconds) + ' 秒，最多延长 ' + X.esc(rule.max_delay_times) + ' 次。规则透明可复现，后台可回放延时全过程。</div></div>');
+  }
+
+  function bodyHTML() {
+    return heroHTML() + '<div style="padding:12px">' + statRow() + bidPanel() +
+      (ses && ses.status === '报名中' ? APP.card('竞价尚未开始', APP.kvRows([
+        ['竞拍开始', X.esc(X.fmtDT(ses.bid_start))],
+        ['竞拍结束', X.esc(X.fmtDT(ses.bid_end))],
+        ['当前状态', APP.sesTag(ses.status)]
+      ]) + '<div class="note"><span class="ni">ⓘ</span><div>已报名并缴纳保证金，竞价开始后可直接出价。开始前会收到推送提醒。</div></div>') : '') +
+      logHTML() + ruleHTML() +
+      '<div class="card flat"><div class="cb">' +
+      '<div class="xs muted" style="margin-bottom:7px">演示辅助（原型专用，真实系统为服务端推送）</div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+      '<button class="btn sm" id="simRival">模拟对手出价</button>' +
+      '<button class="btn sm" id="simDelay">模拟触发延时</button>' +
+      '<button class="btn sm" id="simDegrade">模拟降级</button>' +
+      '<button class="btn sm" id="simReconnect">模拟弱网重连</button>' +
+      '</div></div></div>' +
+      '<div style="height:8px"></div></div>';
+  }
+
+  function barHTML() {
+    var ended = !ses || ['已结束', '已归档', '已终止'].indexOf(ses.status) >= 0;
+    if (ended) return '<div class="actionbar"><button class="btn pri lg grow" data-go="trade/result.html?ses=' + X.esc(ses.session_id) + '">查看成交结果</button></div>';
+    return '<div class="actionbar">' +
+      '<button class="btn lg grow" data-go="asset/detail.html?id=' + X.esc(asset ? asset.asset_id : '') + '">资产详情</button>' +
+      '<button class="btn pri lg grow" id="bidNow">' + (iAmTop() ? '继续加价' : '立即出价') + '</button></div>';
+  }
+
+  function render() {
+    NOW = APP.serverNowFor(ses);
+    APP.mount(APP.shell({
+      title: '竞价', backTo: 'back', sideActive: '竞价（核心）', pad: false,
+      right: '<button class="ra" data-toast="已开启领先/被超越强提醒（震动+声音）">🔔</button>',
+      body: bodyHTML(), bar: barHTML()
+    }));
+    bind();
+  }
+
+  /* ---- 出价核心：真实写入 Bid（不可变追加） ---- */
+  function placeBid(amount) {
+    var cd = X.countdown(ses.bid_end, NOW);
+    if (['已结束', '已归档', '已终止'].indexOf(ses.status) >= 0 || cd.over) { APP.toast('场次已结束，无法出价', 'err'); return; }
+    if (!myReg) { APP.toast('您没有本场次的出价权限（未报名）', 'err'); return; }
+    if (DEGRADED) { APP.toast('当前为只读降级模式，出价通道已关闭', 'err'); return; }
+    var minNext = basePrice() + step();
+    if (amount < minNext) { APP.toast('出价低于最小加价幅度，本次需 ≥ ¥' + X.yuan(minNext), 'err', 3000); return; }
+    var perMin = bids.filter(function (b) { return b.subject_id === me.subject_id; }).length;
+    if (perMin >= (rule ? rule.bid_rate_limit : 60)) { APP.toast('触发限流：单主体出价频率超限（' + (rule ? rule.bid_rate_limit : 60) + ' 次/分钟）', 'err'); return; }
+
+    APP.dialog({
+      title: '确认出价',
+      body: '<div class="center"><div class="xs muted">本次出价</div>' +
+        '<div class="price big" style="font-size:26px">' + X.w(amount) + '<span class="u">万元</span></div>' +
+        '<div class="xs muted" style="margin-top:4px">¥' + X.yuan(amount) + '</div></div>' +
+        '<div class="note warn" style="margin-top:10px"><span class="ni">!</span><div>出价即构成<b>不可撤销要约</b>，竞得后须在 48 小时内签约、7 日内付清价款。' +
+        (cd.urgent ? '<br>当前已进入延时窗口，本次出价将触发延时。' : '') + '</div></div>' +
+        '<div class="xs muted" style="margin-top:8px">幂等键 IDEM-' + X.esc(X.hash(ses.session_id + amount + bids.length).toString(16).slice(0, 10)) + '</div>',
+      okText: '确认出价', cancelText: '再想想',
+      onOk: function () {
+        var seq = bids.length + 1;
+        var t = '2026-10-09 ' + WB.nowHM();
+        DB.insert('bids', {
+          bid_id: 'BID-' + String(DB.all('bids').length + 1).padStart(5, '0'),
+          session_id: ses.session_id, subject_id: me.subject_id,
+          bid_amount: amount, bid_seq: seq, bid_time: t,
+          ip: '10.66.' + (100 + seq) + '.7', device_fp: 'FP-APP-' + X.hash(me.subject_id).toString(16).slice(0, 8),
+          sign: 'SHA256:' + X.hash(ses.session_id + me.subject_id + amount + seq).toString(16),
+          is_top: true, create_time: t
+        });
+        /* 出价即产生兴趣事实 */
+        DB.insert('interests', {
+          fact_id: 'FCT-' + String(DB.all('interests').length + 1).padStart(4, '0'),
+          subject_id: me.subject_id, act_type: '出价', asset_id: asset.asset_id,
+          category: asset.category, act_time: '2026-10-09', weight: 10, is_valid: true, create_time: t
+        });
+        /* 场次当前价 + 出价数同步；延时窗口内触发延时 */
+        var patch = { current_price: amount, top_bidder: me.subject_id, bid_count: seq };
+        var delayMsg = null;
+        if (cd.urgent && rule && rule.delay_seconds) {
+          var newEnd = X.planDate(ses.bid_end, '秒', rule.delay_seconds) + String(ses.bid_end).slice(10);
+          var dEnd = U.asDate(ses.bid_end);
+          if (dEnd) {
+            var t2 = new Date(dEnd.getTime() + rule.delay_seconds * 1000);
+            newEnd = X.fmtDT(t2);
+          }
+          patch.bid_end = newEnd;
+          delayMsg = '距结束 ' + rule.delay_seconds + ' 秒内出价，本次竞价已延长 ' + rule.delay_seconds + ' 秒（规则 ' + rule.code + '）';
+        }
+        DB.update('sessions', ses.session_id, patch);
+        DB.audit('出价', ses.session_id, '竞买人 ' + me.subject_name + ' 出价 ¥' + X.yuan(amount) +
+          '（序列 #' + seq + '，幂等键 IDEM-' + X.hash(ses.session_id + amount + seq).toString(16).slice(0, 10) + '）' +
+          (delayMsg ? '；' + delayMsg : ''), { level: '重要', role: '竞买人' });
+        ses = DB.get('sessions', ses.session_id);
+        bids = DB.all('bids').filter(function (b) { return b.session_id === ses.session_id; }).sort(function (a, b) { return b.bid_seq - a.bid_seq; });
+        delayNotice = delayMsg;
+        APP.toast(delayMsg ? '出价成功，已触发延时' : '出价成功，您当前领先', 'ok', 2800);
+        render();
+      }
+    });
+  }
+
+  function bind() {
+    document.querySelectorAll('[data-bid]').forEach(function (b) {
+      b.onclick = function () { placeBid(Number(b.getAttribute('data-bid'))); };
+    });
+    var cb = document.getElementById('custom');
+    if (cb) cb.onclick = function () {
+      APP.sheet({
+        title: '自定义出价金额',
+        body: '<div class="fld"><label>出价金额（元）</label>' +
+          '<input id="amt" type="number" value="' + (basePrice() + step()) + '"></div>' +
+          '<div class="xs muted">最小加价后金额：¥' + X.yuan(basePrice() + step()) + '（= 当前价 + 1 档 ' + X.yuan(step()) + '）</div>',
+        foot: '<button class="btn grow" data-close="1">取消</button><button class="btn pri grow" id="amtOk">出价</button>',
+        onReady: function (w) {
+          w.querySelector('#amtOk').onclick = function () {
+            var v = Number(w.querySelector('#amt').value);
+            APP.closeSheets();
+            placeBid(v);
+          };
+        }
+      });
+    };
+    var bn = document.getElementById('bidNow');
+    if (bn) bn.onclick = function () { placeBid(basePrice() + step()); };
+
+    /* 模拟对手出价（真实写入，用于演示「被超越」强提醒与延时） */
+    var sr = document.getElementById('simRival');
+    if (sr) sr.onclick = function () {
+      var others = DB.all('bidRegs').filter(function (r) {
+        return r.session_id === ses.session_id && r.subject_id !== me.subject_id && r.status !== '已取消';
+      });
+      if (!others.length) { APP.toast('本场次无其他报名人可模拟', 'err'); return; }
+      var rival = others[bids.length % others.length];
+      var amt = basePrice() + step();
+      var seq = bids.length + 1;
+      var t = '2026-10-09 ' + WB.nowHM();
+      DB.insert('bids', {
+        bid_id: 'BID-' + String(DB.all('bids').length + 1).padStart(5, '0'),
+        session_id: ses.session_id, subject_id: rival.subject_id,
+        bid_amount: amt, bid_seq: seq, bid_time: t,
+        ip: '10.20.' + (100 + seq % 100) + '.9', device_fp: 'FP-' + X.hash(rival.subject_id).toString(16).slice(0, 10),
+        sign: 'SHA256:' + X.hash(ses.session_id + rival.subject_id + amt + seq).toString(16),
+        is_top: true, create_time: t
+      });
+      var patch = { current_price: amt, top_bidder: rival.subject_id, bid_count: seq };
+      var cd = X.countdown(ses.bid_end, NOW);
+      if (cd.urgent && rule && rule.delay_seconds) {
+        var dEnd = U.asDate(ses.bid_end);
+        if (dEnd) patch.bid_end = X.fmtDT(new Date(dEnd.getTime() + rule.delay_seconds * 1000));
+        delayNotice = '距结束 ' + rule.delay_seconds + ' 秒内出价，本次竞价已延长 ' + rule.delay_seconds + ' 秒（规则 ' + rule.code + '）';
+      }
+      DB.update('sessions', ses.session_id, patch);
+      ses = DB.get('sessions', ses.session_id);
+      bids = DB.all('bids').filter(function (b) { return b.session_id === ses.session_id; }).sort(function (a, b) { return b.bid_seq - a.bid_seq; });
+      APP.toast('您的出价已被超越，当前价 ¥' + X.yuan(amt), 'err', 3000);
+      render();
+    };
+    var sd = document.getElementById('simDelay');
+    if (sd) sd.onclick = function () {
+      delayNotice = '距结束 ' + (rule ? rule.delay_seconds : 120) + ' 秒内出价，本次竞价已延长 ' +
+        (rule ? rule.delay_seconds : 120) + ' 秒（规则 ' + (rule ? rule.code : 'BID-01') + '）';
+      render();
+    };
+    var sg = document.getElementById('simDegrade');
+    if (sg) sg.onclick = function () { DEGRADED = true; APP.toast('已降级为只读 + 轮询', 'err'); render(); };
+    var rc = document.getElementById('recover');
+    if (rc) rc.onclick = function () { DEGRADED = false; APP.toast('已恢复实时推送', 'ok'); render(); };
+    var sr2 = document.getElementById('simReconnect');
+    if (sr2) sr2.onclick = function () {
+      ses = DB.get('sessions', ses.session_id);
+      bids = DB.all('bids').filter(function (b) { return b.session_id === ses.session_id; }).sort(function (a, b) { return b.bid_seq - a.bid_seq; });
+      APP.toast('已重连并补齐场次状态、当前价与我的出价状态', 'ok', 2600);
+      render();
+    };
+  }
+
+  if (!ses) {
+    APP.mount(APP.shell({
+      title: '竞价', backTo: 'back', sideActive: '竞价（核心）',
+      body: '<div class="empty"><div class="ei">🔨</div><div class="et">暂无可参与的场次</div>' +
+        '<button class="btn line-pri sm" style="margin-top:10px" data-go="asset/list.html">去浏览资产</button></div>'
+    }));
+    return;
+  }
+
+  render();
+
+  /* 倒计时每秒刷新（真实系统为服务端推送，此处本地 tick 仅刷新展示） */
+  setInterval(function () {
+    var el = document.querySelector('.bh-cd');
+    if (!el || DEGRADED) return;
+    var cd = X.countdown(ses.bid_end, APP.serverNowFor(ses));
+    if (el) {
+      el.className = 'bh-cd' + (cd.urgent ? ' urgent' : '');
+      el.innerHTML = cd.over ? '竞价已结束' : '⏱ 距结束 ' + cd.txt;
+    }
+  }, 1000);
+})();
+</script>
+</body>
+</html>

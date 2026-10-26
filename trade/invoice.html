@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发票管理 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var orders = APP.myOrders();
+  var order = APP.pickOrder(qs.get('order'));
+  var inv = order ? DB.find('invoices', function (i) { return i.order_id === order.order_id; }) : null;
+  var TYPE = '增值税专用发票', MAIL = '电子交付（邮件）';
+
+  function bodyHTML() {
+    if (!order) {
+      return '<div class="empty"><div class="ei">🧾</div><div class="et">暂无可开票的订单</div>' +
+        '<button class="btn line-pri sm" style="margin-top:10px" data-go="mine/orders.html">查看我的订单</button></div>';
+    }
+    var myInvs = orders.map(function (o) {
+      return { o: o, i: DB.find('invoices', function (x) { return x.order_id === o.order_id; }) };
+    }).filter(function (x) { return x.i; });
+
+    return APP.card('选择订单', '<div class="list tight">' + orders.slice(0, 6).map(function (o) {
+      var i = DB.find('invoices', function (x) { return x.order_id === o.order_id; });
+      return '<a class="li" data-go="trade/invoice.html?order=' + o.order_id + '">' +
+        '<div class="li-main"><div class="li-t">' + X.esc(o.order_id) + ' · ' + X.esc((DB.get('assets', o.asset_id) || {}).asset_name || (o.category + '类资产')) + '</div>' +
+        '<div class="li-s">¥' + X.yuan(o.total_amount) + ' · ' + (i ? '已开票 ' + X.esc(i.invoice_id) : '未开票') + '</div></div>' +
+        (o.order_id === order.order_id ? '<span class="c-pri">✓</span>' : '<span class="arrow">›</span>') + '</a>';
+    }).join('') + '</div>') +
+
+    (inv
+      ? APP.card('发票信息', APP.kvRows([
+          ['发票编号', '<span class="mono">' + X.esc(inv.invoice_id) + '</span>'],
+          ['发票抬头', X.esc(inv.title), 'left'],
+          ['纳税人识别号', '<span class="mono small">' + X.esc(inv.tax_no) + '</span>'],
+          ['发票类型', X.esc(inv.type)],
+          ['金额 / 税率', '¥' + X.yuan(inv.amount) + ' / ' + X.pct(inv.tax_rate)],
+          ['开票时间', X.esc(inv.issue_time)],
+          ['交付方式', X.esc(MAIL)],
+          ['状态', APP.tag(inv.status, 'ok')]
+        ]) + '<button class="btn blk" data-toast="电子发票下载（原型演示）">下载电子发票</button>' +
+          '<button class="btn blk line-pri" style="margin-top:8px" data-toast="已重新发送至 ' + X.esc(me.contact_email || '') + '">重新发送到邮箱</button>' +
+          '<div class="xs muted" style="margin-top:8px">如需更换抬头或重开，请在开票后 30 日内提交申请。</div>')
+      : APP.card('申请开票', '<div class="fld"><label>发票抬头<span class="req">*</span></label>' +
+          '<input id="ttl" value="' + X.esc(me.subject_name) + '"></div>' +
+          '<div class="fld"><label>纳税人识别号<span class="req">*</span></label>' +
+          '<input id="tax" value="' + X.esc(me.uscc) + '"></div>' +
+          '<div class="fld"><label>发票类型</label><select id="type">' +
+          ['增值税专用发票', '增值税普通发票'].map(function (t) {
+            return '<option' + (t === TYPE ? ' selected' : '') + '>' + t + '</option>';
+          }).join('') + '</select></div>' +
+          '<div class="fld"><label>交付方式</label><select id="mail">' +
+          ['电子交付（邮件）', '纸质发票邮寄'].map(function (t) {
+            return '<option' + (t === MAIL ? ' selected' : '') + '>' + t + '</option>';
+          }).join('') + '</select></div>' +
+          '<div class="fld"><label>接收邮箱</label><input value="' + X.esc(me.contact_email || '') + '" readonly></div>' +
+          '<div class="note"><span class="ni">ⓘ</span><div>开票金额以订单<b>应付总额</b>为准（成交价 + 佣金 + 税费 − 保证金抵扣）。' +
+          '开票申请与下载均写入审计流水。</div></div>')) +
+
+    APP.card('我的发票台账', myInvs.length
+      ? '<div class="list tight">' + myInvs.map(function (x) {
+          return '<a class="li" data-go="trade/invoice.html?order=' + x.o.order_id + '">' +
+            '<span style="font-size:17px">🧾</span>' +
+            '<div class="li-main"><div class="li-t">' + X.esc(x.i.invoice_id) + '　' + APP.tag(x.i.type, 'info') + '</div>' +
+            '<div class="li-s">' + X.esc(x.o.order_id) + ' · ¥' + X.yuan(x.i.amount) + ' · ' + X.esc(x.i.issue_time) + '</div></div>' +
+            '<span class="arrow">⤓</span></a>';
+        }).join('') + '</div>'
+      : '<div class="empty" style="padding:22px 0"><div class="et">暂无发票记录</div></div>');
+  }
+
+  function barHTML() {
+    if (!order) return '<div class="actionbar"><button class="btn pri lg grow" data-go="mine/orders.html">我的订单</button></div>';
+    return inv
+      ? '<div class="actionbar"><button class="btn lg grow" data-go="trade/pay.html?order=' + order.order_id + '">支付详情</button>' +
+        '<button class="btn pri lg grow" data-toast="电子发票下载（原型演示）">下载发票</button></div>'
+      : '<div class="actionbar"><button class="btn lg grow" data-go="mine/orders.html">我的订单</button>' +
+        '<button class="btn pri lg grow" id="apply">提交开票申请</button></div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '发票管理', backTo: 'back', sideActive: '发票管理',
+      body: '<div style="padding:12px">' + bodyHTML() + '</div>', bar: barHTML()
+    }));
+    bind();
+  }
+
+  function bind() {
+    var ab = document.getElementById('apply');
+    if (!ab) return;
+    ab.onclick = function () {
+      var ttl = (document.getElementById('ttl') || {}).value || '';
+      var tax = (document.getElementById('tax') || {}).value || '';
+      var type = (document.getElementById('type') || {}).value || TYPE;
+      var mail = (document.getElementById('mail') || {}).value || MAIL;
+      if (!ttl.trim()) { APP.toast('请填写发票抬头', 'err'); return; }
+      if (!/^[0-9A-Z]{15,20}$/.test(tax.trim())) { APP.toast('纳税人识别号格式不正确（15–20 位数字/大写字母）', 'err'); return; }
+      var id = 'INV-' + String(DB.all('invoices').length + 1).padStart(4, '0');
+      var t = '2026-10-09 ' + WB.nowHM();
+      DB.insert('invoices', {
+        invoice_id: id, order_id: order.order_id, title: ttl.trim(), tax_no: tax.trim(),
+        amount: order.total_amount, tax_rate: order.tax_rate, type: type,
+        status: '已开', issue_time: t, create_time: t
+      });
+      DB.audit('开票申请', order.order_id, '竞买人 ' + me.subject_name + ' 申请开票 ' + id +
+        '（' + type + '，抬头 ' + ttl.trim() + '，金额 ¥' + X.yuan(order.total_amount) + '，交付 ' + mail + '）',
+        { level: '重要', role: '竞买人' });
+      inv = DB.get('invoices', id);
+      APP.toast('开票成功，发票已' + (mail === '纸质发票邮寄' ? '安排邮寄' : '发送至邮箱'), 'ok', 2600);
+      render();
+    };
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

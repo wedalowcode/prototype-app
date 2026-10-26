@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参拍资格 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var TAB = qs.get('tab') || '';        /* amount | restrict —— 由报名校验链的失败项带过来 */
+  var CATS = DICT.category, REGIONS = DICT.region;
+
+  /* 当前生效 / 暂停的租户关系 */
+  function relations() { return APP.tenantRelationsOf(); }
+  function activeRelations() { return relations().filter(function (t) { return t.status === '生效'; }); }
+  function pausedRelations() { return relations().filter(function (t) { return t.status !== '生效'; }); }
+
+  /* 名单与限制期（校验链第 2、3 步的数据源，与引擎同一批记录） */
+  function lists() {
+    return DB.all('blacklists').filter(function (b) {
+      return b.target_id === me.subject_id && b.status === '生效';
+    });
+  }
+  function scopeText(b) {
+    var sc = b.scope || {};
+    var cs = sc.categories || [], rs = sc.regions || [];
+    /* 范围为空 = 未限定范围：记录在案但不自动拦截（与引擎/校验链同一口径）。
+       这里必须写清楚，否则用户看到「不限品类 / 不限属地」会误以为完全不受限。 */
+    if (!cs.length && !rs.length) return '未限定范围（记录在案，不自动拦截；须由后台补充范围后生效）';
+    return (cs.join('、') || '不限品类') + ' / ' + (rs.join('、') || '不限属地');
+  }
+
+  /* 提交前预览：该申请将新增多少条租户关系（与 Engine.grantTenantRelations 同口径，只算不写） */
+  function previewGrant(cats, regs) {
+    if (!cats.length) return 0;
+    var n = 0;
+    DB.all('orgs').forEach(function (o) {
+      if (regs.length && regs.indexOf(o.region) < 0) return;
+      cats.forEach(function (c) {
+        var exist = DB.find('tenantRelations', function (t) {
+          return t.subject_id === me.subject_id && t.disposal_org_id === o.org_id &&
+            t.category_id === c && t.status === '生效';
+        });
+        if (!exist) n++;
+      });
+    });
+    return n;
+  }
+
+  /* 带 id 与高亮能力的卡片（APP.card 不支持 id，此处需要按 tab 定位高亮） */
+  function hlCard(id, title, body, sub, hl) {
+    return '<div class="card" id="' + id + '"' +
+      (hl ? ' style="border-color:var(--pri);box-shadow:0 0 0 3px var(--pri-l)"' : '') + '>' +
+      '<div class="ch"><h3>' + X.esc(title) + '</h3>' + (sub ? '<span class="sub">' + sub + '</span>' : '') + '</div>' +
+      '<div class="cb">' + body + '</div></div>';
+  }
+
+  function bodyHTML() {
+    var act = activeRelations(), paus = pausedRelations();
+    var orgs = {}, cats = {};
+    act.forEach(function (t) { orgs[t.disposal_org_id] = 1; cats[t.category_id] = 1; });
+    var orgN = Object.keys(orgs).length, catN = Object.keys(cats).length;
+    var apps = APP.myAccess();
+    var pending = apps.filter(function (a) { return a.status === '待审' || a.status === '补充材料'; });
+    var bls = lists();
+    var restrictUntil = me.restrict_until;
+    var restrictOk = !restrictUntil || restrictUntil < WB.TODAY;
+
+    /* 由校验链带过来的定位提示：告诉用户「就是这里卡住了」 */
+    var focus = '';
+    if (TAB === 'amount') {
+      focus = '<div class="note warn" style="margin-bottom:10px"><span class="ni">!</span><div>' +
+        '你刚才是因<b>单笔额度上限</b>被拦截（报名校验链第 6 步）。请在下方的「单笔额度」卡片处理：' +
+        '申请提升额度，或改选起拍价落在额度内的资产。</div></div>';
+    } else if (TAB === 'restrict') {
+      focus = '<div class="note danger" style="margin-bottom:10px"><span class="ni">!</span><div>' +
+        '你刚才是因<b>名单 / 限制期</b>被拦截（报名校验链第 2、3 步）。这两项<b>不可自助申请</b>，' +
+        '请查看下方「受限情况」中的范围与解除条件。</div></div>';
+    }
+
+    return focus +
+
+      '<div class="note" style="margin-bottom:10px"><span class="ni">ⓘ</span><div>' +
+      '参拍资格 = <b>生效的租户关系</b>（主体 × 处置单位 × 品类）+ <b>单笔额度上限</b>。' +
+      '报名校验链第 5 步校验租户关系、第 6 步校验额度上限，缺任一项都报不了名。<br>' +
+      '资格<b>不能自助开通</b>：须提交申请 → 后台「准入审核」认定 → 通过后系统自动生成租户关系。</div></div>' +
+
+      '<div class="grid3" style="margin-bottom:10px">' +
+      g('生效租户关系', act.length) + g('覆盖处置单位', orgN) + g('覆盖品类', catN) +
+      '</div>' +
+
+      hlCard('cardAmount', '单笔额度上限',
+        APP.kvRows([
+          ['主体级上限', '<b>' + X.w(me.bid_amount_limit) + ' 万元</b><div class="xs muted">由主体分级（' + X.esc(me.grade) + ' 级）决定</div>', 'left'],
+          ['租户级上限（最高）', act.length
+            ? '<b>' + X.w(Math.max.apply(null, act.map(function (t) { return t.amount_limit || 0; }))) + ' 万元</b><div class="xs muted">属地内按 100%、跨区按 60% 测算</div>'
+            : '<span class="muted">无生效租户关系</span>', 'left'],
+          ['取更严者', '<b class="price">' + X.w(Math.min(me.bid_amount_limit || Infinity,
+            act.length ? Math.max.apply(null, act.map(function (t) { return t.amount_limit || 0; })) : Infinity)) + ' 万元</b>' +
+            '<div class="xs muted">报名校验链第 6 步按此判定</div>', 'left']
+        ]) +
+        '<button class="btn blk line-pri" style="margin-top:9px" id="btnAmount">申请提升单笔额度</button>' +
+        '<div class="xs muted" style="margin-top:7px">额度调整需后台风控认定（涉及国资监管口径，系统只出建议）。' +
+        '申请期间可继续参拍额度范围内的资产。</div>',
+        X.w(me.bid_amount_limit) + ' 万元', TAB === 'amount') +
+
+      hlCard('cardRestrict', '受限情况',
+        (bls.length || !restrictOk)
+          ? '<div class="checks">' +
+            (bls.length ? bls.map(function (b) {
+              return '<div class="ck no"><div class="ci">!</div><div class="cm">' +
+                '<div class="ct">命中' + X.esc(b.level) + ' ' + APP.tag(b.bl_id, '') + '</div>' +
+                '<div class="cd">来源：' + X.esc(b.source_type) + (b.source_desc ? ' · ' + X.esc(b.source_desc) : '') +
+                '<br>限制范围：' + X.esc(scopeText(b)) +
+                '<br>生效日期：' + X.esc(b.start_date || '—') + (b.end_date ? ' ~ ' + X.esc(b.end_date) : '') + '</div>' +
+                '<div class="xs muted" style="margin-top:2px">解除方式：' +
+                (b.level === '禁入名单' ? '须由后台风控按处罚决定解除，不接受自助申请' : '限制范围外的品类/属地可正常参拍；范围调整须由后台风控处理') +
+                '</div></div></div>';
+            }).join('') : '') +
+            (restrictOk ? '' : '<div class="ck no"><div class="ci">!</div><div class="cm">' +
+              '<div class="ct">处于限制期</div><div class="cd">限制期至 ' + X.esc(restrictUntil) + '（未到期）</div>' +
+              '<div class="xs muted" style="margin-top:2px">解除方式：到期自动解除，无需申请</div></div></div>') +
+            '</div>'
+          : '<div class="note ok"><span class="ni">✓</span><div>未命中任何生效名单，无限制期。</div></div>',
+        (bls.length || !restrictOk) ? '需关注' : '正常', TAB === 'restrict') +
+
+      hlCard('cardTR', '生效租户关系',
+        (act.length
+          ? (function () {
+              var byOrg = {};
+              act.forEach(function (t) { (byOrg[t.disposal_org_id] = byOrg[t.disposal_org_id] || []).push(t); });
+              return Object.keys(byOrg).sort().map(function (oid) {
+                var o = DB.get('orgs', oid);
+                var ts = byOrg[oid].sort(function (a, b) { return String(a.category_id).localeCompare(String(b.category_id)); });
+                return '<div style="padding:9px 0;border-bottom:1px solid var(--line2)">' +
+                  '<div style="display:flex;align-items:center;gap:7px">' +
+                  '<span class="mono xs muted">' + X.esc(oid) + '</span>' +
+                  '<span class="bold" style="font-size:13px">' + X.esc(o ? o.org_name : oid) + '</span>' +
+                  '<span class="xs muted" style="margin-left:auto">' + X.esc(o ? o.region : '') + '</span></div>' +
+                  '<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px">' +
+                  ts.map(function (t) {
+                    return '<span class="tag ok" title="额度上限 ' + X.w(t.amount_limit) + ' 万元">' +
+                      X.esc(t.category_id) + ' · ' + X.w(t.amount_limit) + ' 万</span>';
+                  }).join('') + '</div>' +
+                  '<div class="xs muted" style="margin-top:5px">生效日期 ' +
+                  X.esc(ts[0].start_date || '—') + ' · 共 ' + ts.length + ' 个品类</div>' +
+                  '</div>';
+              }).join('');
+            })()
+          : '<div class="empty" style="padding:22px 0"><div class="ei">⛓</div><div class="et">暂无生效的租户关系</div>' +
+            '<div class="es">报名任何资产都会被第 5 步拦截，请先发起参拍资格申请</div></div>') +
+        (paus.length ? '<div class="note warn" style="margin-top:9px"><span class="ni">⚠</span><div>另有 <b>' + paus.length +
+          '</b> 条租户关系处于<b>暂停</b>状态（' + paus.map(function (t) { return X.esc(t.disposal_org_id + '/' + t.category_id); }).slice(0, 4).join('、') +
+          (paus.length > 4 ? ' 等' : '') + '），暂停期间不可报名对应品类，恢复须由后台处理。</div></div>' : '') +
+        '<button class="btn blk line-pri" style="margin-top:9px" id="btnCat">申请新增参拍品类 / 处置单位</button>',
+        act.length + ' 项', false) +
+
+      hlCard('cardApply', '我的申请记录',
+        (apps.length
+          ? '<div class="list tight">' + apps.map(function (a) {
+              var st = a.status === '通过' ? 'ok' : a.status === '驳回' ? 'danger' : 'warn';
+              return '<div class="li" data-app="' + X.esc(a.access_id) + '"><span style="font-size:17px">' +
+                (a.status === '通过' ? '✅' : a.status === '驳回' ? '⛔' : '⏳') + '</span>' +
+                '<div class="li-main"><div class="li-t">' + X.esc(a.access_id) + '　' +
+                APP.tag(a.apply_type || '品类准入', 'info') + ' ' + APP.tag(a.status, st) + '</div>' +
+                '<div class="li-s">' + (a.apply_type === '额度调整'
+                  ? '期望单笔 ' + X.w(a.apply_amount_limit) + ' 万元'
+                  : ('品类 ' + ((a.apply_categories || []).join('、') || '—') +
+                     ' · 属地 ' + ((a.apply_regions || []).join('、') || '不限'))) +
+                ' · ' + X.esc(String(a.create_time).slice(0, 16)) + '</div></div>' +
+                '<span class="arrow">›</span></div>';
+            }).join('') + '</div>'
+          : '<div class="empty" style="padding:20px 0"><div class="ei">📄</div><div class="et">暂无申请记录</div></div>') +
+        '<div class="xs muted" style="margin-top:8px">申请提交后进入后台「准入审核」（三查：黑名单命中 / 资质完整性 / 初始信用评估），' +
+        '系统只出建议，认定权在审核人；结论通过消息中心通知。</div>',
+        pending.length ? pending.length + ' 项待审' : '') +
+
+      '<div class="note gray"><span class="ni">ⓘ</span><div>' +
+      '① 准入审核<b>通过</b>后，系统自动为「申报品类 × 申报属地内的处置单位」生成生效租户关系；' +
+      '额度调整申请通过后，主体级额度与全部生效租户关系的额度上限<b>同步调整</b>。<br>' +
+      '② 申请期间不影响既有品类参拍；已成交订单的履约不受影响。<br>' +
+      '③ 申请单与审核意见全程留痕，可回溯。</div></div>' +
+
+      '<div style="height:6px"></div>';
+  }
+  function g(l, v) { return '<div class="gcell"><div class="gv">' + v + '</div><div class="gl">' + l + '</div></div>'; }
+
+  /* ---------- 申请表单 ---------- */
+  function openApply(presetType) {
+    var sel = {
+      apply_type: presetType || '品类准入',
+      categories: [],
+      regions: [],
+      amount: ''
+    };
+    function chips(kind, vals, picked) {
+      return '<div class="chips">' + vals.map(function (v) {
+        return '<button data-chip="' + kind + ':' + X.esc(v) + '" class="' + (picked.indexOf(v) >= 0 ? 'on' : '') + '">' +
+          X.esc(v) + '</button>';
+      }).join('') + '</div>';
+    }
+    var body =
+      '<div class="fld"><label>申请事项<span class="req">*</span></label><div class="radios">' +
+      ['品类准入', '额度调整'].map(function (t) {
+        return '<label><input type="radio" name="atype" value="' + t + '"' + (sel.apply_type === t ? ' checked' : '') + '><span>' + t + '</span></label>';
+      }).join('') + '</div>' +
+      '<div class="help">品类准入 = 新增「处置单位 × 品类」的参拍资格；额度调整 = 提高单笔参拍上限。</div></div>' +
+
+      '<div class="fld" id="fldCat"><label>申报品类（可多选）</label>' + chips('cat', CATS, sel.categories) +
+      '<div class="help">至少选择一个品类。准入通过后将为所选品类在申报属地的每个处置单位生成租户关系。</div></div>' +
+
+      '<div class="fld"><label>申报属地（可多选，不选＝不限）</label>' + chips('reg', REGIONS, sel.regions) +
+      '<div class="help">留空表示不限属地，覆盖全部处置单位（跨区额度按 60% 测算）。</div></div>' +
+
+      '<div class="fld" id="fldAmt"><label>期望单笔额度（万元）</label>' +
+      '<input type="number" id="amt" min="0" step="10" placeholder="例如 3000" value="' + X.esc(sel.amount) + '">' +
+      '<div class="help">当前主体级上限 ' + X.w(me.bid_amount_limit) + ' 万元。额度调整须高于当前上限，且需后台风控认定。</div></div>' +
+
+      '<div class="fld"><label>申请理由<span class="req">*</span></label>' +
+      '<textarea id="reason" rows="2" placeholder="例如：拟参与山东、江苏地区的催化剂类资产，现有额度不足"></textarea></div>' +
+
+      '<div class="note" id="apPreview"></div>';
+
+    APP.sheet({
+      title: '发起参拍资格申请',
+      body: body,
+      foot: '<button class="btn grow" data-close="1">取消</button>' +
+        '<button class="btn pri grow" id="okApply">提交申请</button>',
+      onReady: function (w) {
+        function syncType() {
+          var t = w.querySelector('input[name=atype]:checked').value;
+          sel.apply_type = t;
+          w.querySelector('#fldAmt').style.display = t === '额度调整' ? '' : 'none';
+          w.querySelector('#fldCat').style.display = t === '额度调整' ? 'none' : '';
+        }
+        function preview() {
+          if (sel.apply_type === '额度调整') {
+            var want = Number(sel.amount) || 0;
+            w.querySelector('#apPreview').innerHTML = '<span class="ni">ⓘ</span><div>' +
+              (want > me.bid_amount_limit
+                ? '提交后主体级额度上限将由 <b>' + X.w(me.bid_amount_limit) + ' 万元</b> 调整为 <b>' + X.w(want * 10000) +
+                  ' 万元</b>，并按属地系数等比同步 <b>' + activeRelations().length + '</b> 条生效租户关系的额度上限。'
+                : '<span class="c-danger">期望额度须高于当前主体级上限 ' + X.w(me.bid_amount_limit) + ' 万元。</span>') + '</div>';
+            return;
+          }
+          var n = previewGrant(sel.categories, sel.regions);
+          w.querySelector('#apPreview').innerHTML = '<span class="ni">ⓘ</span><div>' +
+            (sel.categories.length
+              ? '审核通过后预计新增 <b class="c-pri">' + n + '</b> 条生效租户关系（' + sel.categories.length + ' 个品类 × ' +
+                (sel.regions.length ? sel.regions.join('、') + ' 内' : '全部') + '处置单位）。'
+              : '请至少选择一个申报品类。') + '</div>';
+        }
+        w.querySelectorAll('input[name=atype]').forEach(function (r) { r.onchange = function () { syncType(); preview(); }; });
+        w.querySelectorAll('[data-chip]').forEach(function (b) {
+          b.onclick = function () {
+            var v = b.getAttribute('data-chip'), i = v.indexOf(':'), k = v.slice(0, i), val = v.slice(i + 1);
+            var arr = k === 'cat' ? sel.categories : sel.regions;
+            var j = arr.indexOf(val);
+            if (j >= 0) arr.splice(j, 1); else arr.push(val);
+            b.classList.toggle('on', j < 0);
+            preview();
+          };
+        });
+        w.querySelector('#amt').oninput = function () { sel.amount = this.value; preview(); };
+
+        w.querySelector('#okApply').onclick = function () {
+          var reason = w.querySelector('#reason').value.trim();
+          if (sel.apply_type === '品类准入' && !sel.categories.length) { APP.toast('请至少选择一个申报品类', 'err'); return; }
+          if (sel.apply_type === '额度调整') {
+            var want = Number(sel.amount) || 0;
+            if (!want) { APP.toast('请填写期望单笔额度', 'err'); return; }
+            if (want * 10000 <= me.bid_amount_limit) { APP.toast('期望额度须高于当前上限 ' + X.w(me.bid_amount_limit) + ' 万元', 'err'); return; }
+          }
+          if (!reason) { APP.toast('请填写申请理由', 'err'); return; }
+
+          var rec = APP.accessApply({
+            apply_type: sel.apply_type,
+            apply_categories: sel.categories,
+            apply_regions: sel.regions,
+            apply_amount_limit: sel.apply_type === '额度调整' ? Number(sel.amount) * 10000 : null,
+            reason: reason
+          });
+          APP.closeSheets();
+          render();
+          APP.toast('申请已提交：' + rec.access_id + '，待后台准入审核', 'ok', 2800);
+        };
+        syncType();
+        preview();
+      }
+    });
+  }
+
+  /* 申请详情 */
+  function openApp(accessId) {
+    var a = DB.get('accessReviews', accessId);
+    if (!a) return;
+    var st = a.status === '通过' ? 'ok' : a.status === '驳回' ? 'danger' : 'warn';
+    APP.sheet({
+      title: '申请单 ' + a.access_id,
+      body: APP.kvRows([
+        ['申请事项', X.esc(a.apply_type || '品类准入')],
+        ['申请来源', a.source === 'APP' ? '竞买人 APP 自助提交' : '后台代提交'],
+        ['申报品类', X.esc((a.apply_categories || []).join('、') || '—'), 'left'],
+        ['申报属地', X.esc((a.apply_regions || []).join('、') || '不限'), 'left'],
+        ['期望单笔额度', a.apply_amount_limit ? X.w(a.apply_amount_limit) + ' 万元' : '—'],
+        ['系统建议', X.esc(a.result || '待计算')],
+        ['审核状态', APP.tag(a.status, st)],
+        ['审核人', X.esc(a.auditor || '—')],
+        ['审核时间', X.esc(a.audit_time || '—')],
+        ['申请与审核意见', X.esc(a.condition || '—'), 'left']
+      ]) +
+      '<div class="note" style="margin-top:9px"><span class="ni">ⓘ</span><div>' +
+      '系统只出<b>建议结论</b>（黑名单命中 / 资质完整性 / 初始信用评估），最终认定由审核人签字负责，' +
+      '全部结论可回溯到源记录。</div></div>',
+      foot: '<button class="btn grow" data-close="1">关闭</button>'
+    });
+  }
+
+  function barHTML() {
+    return '<div class="actionbar">' +
+      '<button class="btn lg grow" data-go="asset/list.html">浏览资产</button>' +
+      '<button class="btn pri lg grow" id="btnNew">＋ 发起参拍资格申请</button></div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '参拍资格', backTo: 'back', sideActive: '参拍资格 / 资格申请',
+      body: '<div style="padding:12px">' + bodyHTML() + '</div>',
+      bar: barHTML()
+    }));
+    bind();
+    /* tab 定位：由报名校验链的失败项带过来，滚动到对应卡片 */
+    if (TAB === 'amount' || TAB === 'restrict') {
+      var el = document.getElementById(TAB === 'amount' ? 'cardAmount' : 'cardRestrict');
+      if (el) setTimeout(function () { el.scrollIntoView({ block: 'center' }); }, 80);
+    }
+  }
+
+  function bind() {
+    var bn = document.getElementById('btnNew');
+    if (bn) bn.onclick = function () { openApply('品类准入'); };
+    var ba = document.getElementById('btnAmount');
+    if (ba) ba.onclick = function () { openApply('额度调整'); };
+    var bc = document.getElementById('btnCat');
+    if (bc) bc.onclick = function () { openApply('品类准入'); };
+    document.querySelectorAll('[data-app]').forEach(function (el) {
+      el.onclick = function () { openApp(el.getAttribute('data-app')); };
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

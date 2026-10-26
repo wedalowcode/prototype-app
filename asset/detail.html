@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>资产详情 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var asset = DB.get('assets', qs.get('id')) || DB.all('assets')[0];
+  var ses = DB.find('sessions', function (s) { return s.asset_id === asset.asset_id && s.status !== '已终止'; });
+  var dp = E.depositPlan(me, asset.start_price);
+  var inc = asset.min_increment;
+  var myReg = DB.find('bidRegs', function (r) { return r.asset_id === asset.asset_id && r.subject_id === me.subject_id && r.status !== '已取消'; });
+  /* 收藏 = 一条 InterestFact（act_type 与引擎权重表 ACT_WEIGHT 的键保持一致：'收藏'）。
+     只查有效事实：取消收藏是「作废」而不是物理删除（PRD：全对象禁止物理删除）。 */
+  var myFav = DB.find('interests', function (f) {
+    return f.asset_id === asset.asset_id && f.subject_id === me.subject_id &&
+      f.act_type === '收藏' && f.is_valid !== false;
+  });
+  var check = E.registrationCheck(me, asset);
+  var failed = check.filter(function (c) { return !c.pass; });
+  var canReg = failed.length === 0;
+  var regCount = DB.all('bidRegs').filter(function (r) { return r.session_id === ses && r.status !== '已取消'; }).length;
+  var readNotice = false;
+
+  /* ---- ① 图视频轮播 ---- */
+  function galleryHTML() {
+    return '<div style="position:relative;margin:-12px -12px 10px">' +
+      '<div style="height:196px;background:linear-gradient(135deg,#e3e8f0,#c8d1de);display:flex;align-items:center;justify-content:center;font-size:56px">' +
+      APP.catIcon(asset.category) + '</div>' +
+      '<div style="position:absolute;top:10px;left:12px">' + APP.assetStTag(asset.asset_status) + '</div>' +
+      '<div style="position:absolute;top:10px;right:12px;background:rgba(15,23,42,.6);color:#fff;font-size:11px;padding:2px 9px;border-radius:12px">' +
+      '1 / ' + ((asset.media || []).length || 1) + '　含视频</div>' +
+      '<div style="position:absolute;bottom:10px;left:12px;display:flex;gap:5px">' +
+      (asset.media || []).map(function (m, i) {
+        return '<span style="width:' + (i === 0 ? 16 : 6) + 'px;height:6px;border-radius:3px;background:' + (i === 0 ? '#fff' : 'rgba(255,255,255,.5)') + '"></span>';
+      }).join('') + '</div>' +
+      '<div style="position:absolute;bottom:10px;right:12px;background:rgba(15,23,42,.6);color:#fff;font-size:11px;padding:2px 8px;border-radius:5px">支持图片放大 / 长按保存</div>' +
+      '</div>';
+  }
+
+  /* ---- ②③④ 标题 + 价格区 + 竞拍区 ---- */
+  function headHTML() {
+    var cd = ses ? X.countdown(ses.status === '竞拍中' ? ses.bid_end : ses.reg_end, APP.SERVER_TIME) : null;
+    return '<div class="card"><div class="cb">' +
+      '<div class="bold" style="font-size:16px;line-height:1.4">' + X.esc(asset.asset_name) + '</div>' +
+      '<div class="xs muted" style="margin-top:3px">资产编码 ' + X.esc(asset.asset_code) + ' · 处置单位 ' + X.esc(asset.disposal_org) + '</div>' +
+      '<div class="ac-tags" style="margin-top:7px">' + APP.tag(asset.category, 'pri') +
+      (asset.is_package ? APP.tag('打包处置', 'info') : '') +
+      APP.tag(asset.region || '—') + '</div>' +
+      '</div>' +
+      '<div style="border-top:1px solid var(--line2);padding:11px 13px;background:#fcfcfd">' +
+      '<div class="grid2">' +
+      '<div><div class="xs muted">起拍价</div><div class="price" style="font-size:22px">' + X.w(asset.start_price) + '<span class="u">万</span></div></div>' +
+      '<div class="right"><div class="xs muted">评估价</div><div class="bold money" style="font-size:15px">' + X.w(asset.eval_price) + ' 万</div>' +
+      '<div class="xs c-ok">溢价空间 ' + X.pct(asset.eval_price / asset.start_price - 1) + '</div></div>' +
+      '</div>' +
+      '<div style="margin-top:9px;display:flex;gap:14px;font-size:12px">' +
+      '<span class="muted">加价幅度 <b class="mono">¥' + X.yuan(inc) + '</b></span>' +
+      '<span class="muted">保证金 <b class="c-pri">¥' + X.yuan(dp.amount) + '</b></span>' +
+      '</div>' +
+      '<div class="xs muted" style="margin-top:4px">保证金按 ' + X.esc(dp.ruleCode) + ' ' + X.esc(dp.ruleVersion) + ' ' + X.esc(dp.ruleName) + ' 测算（比例 ' + X.pct(dp.ratio) + '）' +
+      (dp.clamped ? '，已' + X.esc(dp.clamped) : '') + '；<b>保留价不对外展示</b></div>' +
+      '</div>' +
+      (ses ? '<div style="border-top:1px solid var(--line2);padding:11px 13px">' +
+        '<div style="display:flex;align-items:center;gap:8px">' +
+        '<div style="flex:1"><div class="xs muted">' + (ses.status === '竞拍中' ? '当前价' : '报名 / 竞拍时间') + '</div>' +
+        (ses.status === '竞拍中'
+          ? '<div class="price" style="font-size:24px">' + X.w(ses.current_price) + '<span class="u">万</span></div>' +
+            '<div class="xs muted">出价 ' + ses.bid_count + ' 次 · 领先 ' + (ses.top_bidder ? X.esc(ses.top_bidder) : '—') + '</div>'
+          : '<div class="bold" style="font-size:13px;margin-top:2px">报名 ' + X.fmtDT(ses.reg_start).slice(0, 10) + ' ~ ' + X.fmtDT(ses.reg_end).slice(0, 10) + '</div>' +
+            '<div class="xs muted">竞拍 ' + X.fmtDT(ses.bid_start) + ' ~ ' + X.fmtDT(ses.bid_end) + '</div>') +
+        '</div>' +
+        (cd ? '<div class="center"><div class="xs muted">' + (ses.status === '竞拍中' ? '距结束' : '距报名截止') + '</div>' +
+          '<div class="mono bold ' + (cd.urgent ? 'c-danger' : 'c-pri') + '" style="font-size:15px">' + cd.txt + '</div></div>' : '') +
+        '</div>' +
+        '<div style="margin-top:8px;display:flex;gap:14px;font-size:12px" class="muted">' +
+        '<span>场次 <b class="mono">' + X.esc(ses.session_id) + '</b></span>' +
+        '<span>已报名 <b>' + regCount + '</b> 人</span>' +
+        '<span>' + APP.sesTag(ses.status) + '</span>' +
+        '</div></div>' : '') +
+      '</div>';
+  }
+
+  /* ---- ⑤ 标的信息 ---- */
+  function infoHTML() {
+    return APP.card('标的信息', APP.kvRows([
+      ['资产品类', X.esc(asset.category)],
+      ['规格型号', X.esc(asset.spec || '—')],
+      ['数量', '<b>' + X.esc(asset.qty) + '</b> ' + X.esc(asset.unit)],
+      ['是否打包', asset.is_package ? '打包处置（不可拆分）' : '可单项处置'],
+      ['标的属地', X.esc(asset.region || '—')],
+      ['存放地点', X.esc(asset.location || '—'), 'left'],
+      ['看样支持', asset.support_inspect ? APP.tag('支持现场看样', 'ok') : APP.tag('不支持看样', '')]
+    ]));
+  }
+
+  /* ---- ⑥ 瑕疵说明（必展示，醒目） ---- */
+  function defectHTML() {
+    return '<div class="card" style="border:1px solid #f3c3cb"><div class="ch" style="background:var(--pri-l)">' +
+      '<h3 style="color:var(--pri)">⚠ 瑕疵说明（必读）</h3><span class="sub" style="color:var(--pri)">务必现场看样确认</span></div>' +
+      '<div class="cb"><div class="small">' + X.esc(asset.defect_note) + '</div>' +
+      '<div class="note danger" style="margin-top:9px"><span class="ni">!</span><div>标的物以<b>现状</b>处置，平台不对质量、数量、权属完整性作任何保证。竞买人一经出价即视为已充分了解并接受全部瑕疵。</div></div>' +
+      '</div></div>';
+  }
+
+  /* ---- ⑦ 竞买须知（必读，记录阅读） ---- */
+  function noticeHTML() {
+    return '<div class="card"><div class="ch"><h3>竞买须知</h3><span class="sub">须阅读至底部</span></div><div class="cb">' +
+      '<div id="noticeBox" style="max-height:96px;overflow-y:auto;font-size:12.5px;color:var(--ink2);border:1px solid var(--line);border-radius:9px;padding:10px;line-height:1.75" onscroll="window.__noticeScroll&&window.__noticeScroll(this)">' +
+      X.esc(asset.bid_notice).split(/；|。/).filter(Boolean).map(function (s) { return '· ' + X.esc(s) + '。'; }).join('<br>') +
+      '<br>· 本次竞价适用 ' + X.esc(ses ? ses.rule_code : 'BID-01') + ' 规则，延时窗口与最大延时次数以规则快照为准。<br>' +
+      '· 所有时限以<b>服务端时间</b>为准，客户端时间仅作展示。<br>' +
+      '· 出价记录只增不改，带服务端时间与签名，全程可审计。<br>' +
+      '· 保留价不对外展示，最高出价未达保留价时判定流拍。' +
+      '</div>' +
+      '<div class="xs muted" id="readTip" style="margin-top:6px">↓ 请向下滑动阅读完整须知</div>' +
+      '</div></div>';
+  }
+
+  /* ---- ⑧ 附件公告 ---- */
+  function attachHTML() {
+    return APP.card('附件与公告', '<div class="list">' +
+      [['资产处置公告.pdf', 'PDF · 320KB'], ['资产评估报告.pdf', 'PDF · 1.2MB'], ['看样安排通知.docx', 'DOCX · 88KB']].map(function (f) {
+        return '<a class="li" data-toast="附件下载（原型演示）"><span style="font-size:17px">📄</span>' +
+          '<div class="li-main"><div class="li-t">' + X.esc(f[0]) + '</div><div class="li-s">' + X.esc(f[1]) + '</div></div>' +
+          '<span class="arrow">⤓</span></a>';
+      }).join('') + '</div>');
+  }
+
+  /* ---- ⑨ 资质提示 ---- */
+  function qualHTML() {
+    var req = asset.required_qual || [];
+    if (!req.length) return APP.card('资质要求', '<div class="note ok"><span class="ni">✓</span><div>本资产无专项资质门槛，已通过实名认证即可报名。</div></div>');
+    var mine = DB.filter('quals', function (q) { return q.subject_id === me.subject_id && q.audit_status === '通过'; })
+      .map(function (q) { return q.qual_type; });
+    return APP.card('资质要求', '<div class="checks">' + req.map(function (q) {
+      var ok = mine.indexOf(q) >= 0;
+      return '<div class="ck ' + (ok ? 'ok' : 'no') + '"><div class="ci">' + (ok ? '✓' : '!') + '</div><div class="cm">' +
+        '<div class="ct">' + X.esc(q) + '</div>' +
+        '<div class="cd">' + (ok ? '已具备有效资质' : '尚未具备 —— 需先完成认证') + '</div></div></div>';
+    }).join('') + '</div>' +
+    (req.some(function (q) { return mine.indexOf(q) < 0; })
+      ? '<button class="btn blk line-pri" style="margin-top:9px" data-go="mine/cert.html">去补充资质</button>' : '') +
+    '<button class="btn blk" style="margin-top:7px" data-go="mine/access.html">查看我的参拍资格（租户关系 / 额度上限）</button>');
+  }
+
+  /* ---- 底部固定操作条 ---- */
+  function barHTML() {
+    var dis = !canReg;
+    return '<div class="actionbar">' +
+      '<button class="ab-i" data-go="asset/inspect.html?id=' + asset.asset_id + '"><span class="ic">👁️</span>看样</button>' +
+      '<button class="ab-i" id="favBtn"><span class="ic">' + (myFav ? '★' : '☆') + '</span>' + (myFav ? '已收藏' : '收藏') + '</button>' +
+      (myReg
+        ? '<button class="btn pri lg grow" data-go="trade/bidding.html?ses=' + (ses ? ses.session_id : '') + '">我已报名 · 去出价</button>'
+        : '<button class="btn pri lg grow' + (dis ? ' dis' : '') + '" id="regBtn">' + (dis ? '不满足报名条件' : '立即报名') + '</button>') +
+      '</div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '资产详情', backTo: 'back', sideActive: '资产详情',
+      right: '<button class="ra" data-toast="已复制资产链接">⤴</button>',
+      body: galleryHTML() + headHTML() + infoHTML() + defectHTML() + qualHTML() + noticeHTML() + attachHTML() +
+        '<div style="height:8px"></div>',
+      bar: barHTML()
+    }));
+    bind();
+  }
+
+  function bind() {
+    var fb = document.getElementById('favBtn');
+    if (fb) fb.onclick = function () {
+      if (myFav) {
+        /* 取消收藏 = 作废该兴趣事实（保留记录可追溯），不做物理删除 */
+        DB.update('interests', myFav.fact_id, { is_valid: false });
+        DB.audit('取消收藏', myFav.fact_id, 'APP 端取消收藏资产 ' + asset.asset_id + '（兴趣事实作废，记录保留）',
+          { level: '一般', role: '竞买人' });
+        myFav = null; APP.toast('已取消收藏');
+      } else {
+        myFav = DB.insert('interests', {
+          fact_id: 'FCT-' + String(DB.all('interests').length + 1).padStart(4, '0'),
+          subject_id: me.subject_id, act_type: '收藏', asset_id: asset.asset_id,
+          category: asset.category, act_time: '2026-10-09', weight: 3, is_valid: true, create_time: '2026-10-09 ' + WB.nowHM()
+        });
+        APP.toast('已加入收藏', 'ok');
+      }
+      render();
+    };
+    var rb = document.getElementById('regBtn');
+    if (rb) rb.onclick = function () {
+      if (!canReg) {
+        /* 未通过项按「第几步失败 → 去哪里处理」分别给入口；名单 / 限制期不可自助办理，只说明解除条件 */
+        var seen = {}, btns = [];
+        failed.forEach(function (c) {
+          var f = APP.checkFix(c);
+          if (!f || seen[f.href]) return;
+          seen[f.href] = 1;
+          btns.push('<button class="btn pri grow" data-go="' + X.esc(f.href) + '">' + X.esc(f.label) + '</button>');
+        });
+        APP.sheet({
+          title: '暂不满足报名条件',
+          body: '<div class="note danger"><span class="ni">!</span><div>报名校验未通过，请先处理以下 ' + failed.length + ' 项：</div></div>' +
+            '<div class="checks" style="margin-top:10px">' + failed.map(function (c) {
+              var f = APP.checkFix(c);
+              return '<div class="ck no"><div class="ci">' + c.n + '</div><div class="cm">' +
+                '<div class="ct">' + X.esc(c.name) + '</div><div class="cd">' + X.esc(c.detail) + '</div>' +
+                (f ? '<div class="xs muted" style="margin-top:3px">处理方式：' + X.esc(f.tip) + '</div>' : '') +
+                '</div></div>';
+            }).join('') + '</div>',
+          foot: '<button class="btn' + (btns.length ? '' : ' pri') + ' grow" data-close="1">知道了</button>' +
+            btns.slice(0, 2).join('')
+        });
+        return;
+      }
+      if (!readNotice) { APP.toast('请先阅读竞买须知至底部', 'err'); document.getElementById('noticeBox').scrollTop = 9999; return; }
+      APP.go('trade/signup.html?id=' + asset.asset_id);
+    };
+    /* 须知滚动到底即记录阅读 */
+    window.__noticeScroll = function (el) {
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 6 && !readNotice) {
+        readNotice = true;
+        var tip = document.getElementById('readTip');
+        if (tip) { tip.className = 'xs c-ok'; tip.textContent = '✓ 已阅读完整竞买须知（已记录）'; }
+        /* 真实留痕：阅读行为写入兴趣事实 */
+        DB.insert('interests', {
+          fact_id: 'FCT-' + String(DB.all('interests').length + 1).padStart(4, '0'),
+          subject_id: me.subject_id, act_type: '阅读须知', asset_id: asset.asset_id,
+          category: asset.category, act_time: '2026-10-09', weight: 1, is_valid: true, create_time: '2026-10-09 ' + WB.nowHM()
+        });
+      }
+    };
+    /* 内容过短时直接视为已读 */
+    setTimeout(function () {
+      var el = document.getElementById('noticeBox');
+      if (el && el.scrollHeight <= el.clientHeight + 6) window.__noticeScroll(el);
+    }, 60);
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

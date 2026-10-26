@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>看样预约 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var asset = DB.get('assets', qs.get('id')) || DB.all('assets')[0];
+  var ses = DB.find('sessions', function (s) { return s.asset_id === asset.asset_id && s.status !== '已终止'; });
+  var appts = APP.myAppts().filter(function (a) { return a.asset_id === asset.asset_id; });
+
+  /* 可预约时段：按报名期内的自然日生成时间槽（可配置） */
+  function slots() {
+    var out = [], base = ses ? String(ses.reg_start).slice(0, 10) : '2026-10-12';
+    var times = ['09:00-10:30', '10:30-12:00', '14:00-15:30', '15:30-17:00'];
+    for (var d = 1; d <= 3; d++) {
+      var day = X.planDate(base, '天', d).slice(0, 10);
+      times.forEach(function (t, i) { out.push({ d: day, t: t, cap: 6 - ((d * 3 + i) % 4), booked: (d + i) % 3 }); });
+    }
+    return out;
+  }
+
+  var SLOT = null;
+  var CANCEL_HOURS = 24;   /* 提前 24 小时可取消（可配置） */
+
+  function bodyHTML() {
+    return APP.card('预约资产', APP.kvRows([
+      ['资产名称', '<b>' + X.esc(asset.asset_name) + '</b>', 'left'],
+      ['资产编码', X.esc(asset.asset_code)],
+      ['存放地点', X.esc(asset.location || '—'), 'left'],
+      ['处置单位', X.esc(asset.disposal_org)],
+      ['看样联系人', X.esc(asset.publisher || '张明远') + ' · 138****6621']
+    ])) +
+    (appts.length ? APP.card('我的预约记录', '<div class="tl">' + appts.map(function (a) {
+      return '<div class="ti ' + (a.status === '已到访' ? 'done' : 'cur') + '">' +
+        '<div class="tt">' + X.esc(a.slot) + '　' + APP.tag(a.status, a.status === '已到访' ? 'ok' : a.status === '已取消' ? '' : 'pri') + '</div>' +
+        '<div class="tb">联系人 ' + X.esc(a.contact) + ' · ' + X.esc(a.mobile) + (a.remark ? '<br>备注：' + X.esc(a.remark) : '') + '</div>' +
+        '<div class="tm">' + X.esc(a.appt_id) + ' · 提交于 ' + X.esc(a.create_time) +
+        (a.status === '待到访' ? '　<button class="btn sm ghost" data-cancel="' + X.esc(a.appt_id) + '">取消预约</button>' : '') + '</div>' +
+        '</div>';
+    }).join('') + '</div>' +
+      '<div class="note warn" style="margin-top:10px"><span class="ni">⚠</span><div>爽约累计 <b>2 次</b>将触发违约规则 <b>BT08</b>（看样爽约），影响信用分与报名资格。</div></div>')
+      : '') +
+    APP.card('选择预约时段', '<div class="small muted" style="margin-bottom:8px">可选择 3 个自然日内的时段，每时段限 6 家（余量实时显示）</div>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' + slots().map(function (s) {
+        var left = s.cap - s.booked;
+        var full = left <= 0;
+        return '<div data-slot="' + s.d + '|' + s.t + '" class="gcell' + (full ? ' ' : '') + '" ' +
+          'style="cursor:' + (full ? 'not-allowed' : 'pointer') + ';opacity:' + (full ? '.45' : '1') + ';text-align:left;padding:9px 10px">' +
+          '<div class="bold" style="font-size:12.5px">' + X.esc(s.d.slice(5)) + ' ' + X.esc(s.t.split('-')[0]) + '</div>' +
+          '<div class="xs muted">' + (full ? '已约满' : '余 ' + left + ' 个名额') + '</div></div>';
+      }).join('') + '</div>') +
+    APP.card('联系人信息', '<div class="fld"><label>联系人姓名<span class="req">*</span></label>' +
+      '<input id="cname" value="' + X.esc(me.contact_name || '') + '" placeholder="现场对接人姓名"></div>' +
+      '<div class="fld"><label>手机号<span class="req">*</span></label>' +
+      '<input id="cmobile" value="' + X.esc(me.contact_mobile || '') + '" placeholder="11 位手机号"></div>' +
+      '<div class="fld"><label>备注（选填）</label><textarea id="cremark" rows="2" placeholder="如：需查看设备铭牌 / 需带吊装设备"></textarea></div>' +
+      '<div class="xs muted">到场请携带：营业执照复印件（加盖公章）、法人或授权人身份证、授权委托书、必要资质原件。</div>') +
+    APP.card('到场须知', '<div class="note"><span class="ni">ⓘ</span><div>' +
+      '① 请提前 10 分钟到达，出示预约编号与身份证件；<br>' +
+      '② 进入堆场须佩戴安全帽等劳保用品，服从现场管理；<br>' +
+      '③ 看样仅限查看外观与数量，不得拆卸、取样、试机；<br>' +
+      '④ 预约可在开始前 <b>' + CANCEL_HOURS + ' 小时</b>免费取消，逾期取消视为爽约。</div></div>');
+  }
+
+  function barHTML() {
+    return '<div class="actionbar">' +
+      '<button class="btn pri lg grow" id="submit">' + (SLOT ? '预约 ' + SLOT.d.slice(5) + ' ' + SLOT.t : '请先选择时段') + '</button>' +
+      '</div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '看样预约', backTo: 'back', sideActive: '看样预约',
+      body: bodyHTML(), bar: barHTML()
+    }));
+    bind();
+  }
+
+  function bind() {
+    document.querySelectorAll('[data-slot]').forEach(function (el) {
+      el.onclick = function () {
+        if (/已约满/.test(el.textContent)) { APP.toast('该时段已约满，请选择其他时段', 'err'); return; }
+        var p = el.getAttribute('data-slot').split('|');
+        SLOT = { d: p[0], t: p[1] };
+        render();
+      };
+    });
+    document.querySelectorAll('[data-cancel]').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-cancel');
+        var a = DB.get('inspectAppts', id);
+        APP.dialog({
+          title: '取消看样预约',
+          body: '预约时段：' + X.esc(a.slot) + '<br>开始前 ' + CANCEL_HOURS + ' 小时内取消将记为爽约，累计 2 次触发违约规则 BT08。',
+          okText: '确认取消', danger: true,
+          onOk: function () {
+            DB.update('inspectAppts', id, { status: '已取消' });
+            APP.toast('预约已取消', 'ok');
+            render();
+          }
+        });
+      };
+    });
+    var sb = document.getElementById('submit');
+    if (sb) sb.onclick = function () {
+      if (!SLOT) { APP.toast('请先选择预约时段', 'err'); return; }
+      var name = (document.getElementById('cname') || {}).value || '';
+      var mob = (document.getElementById('cmobile') || {}).value || '';
+      var rmk = (document.getElementById('cremark') || {}).value || '';
+      if (!name.trim()) { APP.toast('请填写联系人姓名', 'err'); return; }
+      if (!/^1\d{10}$/.test(mob.trim())) { APP.toast('手机号格式不正确（须 11 位）', 'err'); return; }
+      var id = 'APT-' + String(DB.all('inspectAppts').length + 1).padStart(4, '0');
+      DB.insert('inspectAppts', {
+        appt_id: id, subject_id: me.subject_id, asset_id: asset.asset_id,
+        session_id: ses ? ses.session_id : null,
+        slot: SLOT.d + ' ' + SLOT.t, contact: name.trim(), mobile: mob.trim(), remark: rmk.trim(),
+        status: '待到访', address: asset.location || '处置单位指定堆场',
+        create_time: '2026-10-09 ' + WB.nowHM()
+      });
+      APP.dialog({
+        title: '预约提交成功',
+        body: '预约编号 <b>' + id + '</b><br>' +
+          '时段：' + X.esc(SLOT.d + ' ' + SLOT.t) + '<br>' +
+          '地址：' + X.esc(asset.location || '处置单位指定堆场') + '<br>' +
+          '联系人：' + X.esc(name.trim()) + ' ' + X.esc(mob.trim()),
+        okText: '查看我的预约', cancelText: '返回',
+        onOk: function () { SLOT = null; render(); }
+      });
+    };
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

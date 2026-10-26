@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交割进度 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var order = APP.pickOrder(qs.get('order'));
+  if (!order) { empty(); return; }
+  var asset = order.asset_id ? DB.get('assets', order.asset_id) : null;
+  /* 历史存量订单无线上资产（种子 asset_id 为 null）：与后台订单详情同一口径标注，不显示裸「—」 */
+  var noAsset = !asset;
+  var ASSET_TXT = noAsset ? (order.category + '类资产（历史存量订单，无线上资产）') : '';
+  var perf = APP.perfOf(order.order_id);
+  var dlv = DB.find('deliveries', function (d) { return d.order_id === order.order_id; });
+  var pays = DB.all('payments').filter(function (p) { return p.order_id === order.order_id && p.status === '成功'; });
+  var paidOk = pays.length > 0;
+  var isDemo = String(order.order_no).indexOf('DEMO') === 0;
+  var MODE = '自提';
+
+  /* 分项交割清单：按资产是否为打包件生成条目，逐项标记完成（支持部分交割/挂起） */
+  function items() {
+    if (dlv && dlv.items) return dlv.items;
+    var n = asset && asset.is_package ? 3 : 1;
+    var names = asset && asset.is_package
+      ? ['主体设备', '配套附件', '随机资料与铭牌']
+      : ['标的物整体'];
+    return names.slice(0, n).map(function (nm, i) {
+      return { name: nm, status: dlv ? '已完成' : (paidOk && i === 0 ? '交割中' : '待交割') };
+    });
+  }
+  function progress() {
+    var it = items();
+    var done = it.filter(function (x) { return x.status === '已完成'; }).length;
+    return { done: done, total: it.length, pct: it.length ? done / it.length : 0 };
+  }
+
+  function empty() {
+    APP.mount(APP.shell({
+      title: '交割进度', backTo: 'back', sideActive: '交割进度',
+      body: '<div class="empty"><div class="ei">🚚</div><div class="et">暂无交割中的订单</div>' +
+        '<button class="btn line-pri sm" style="margin-top:10px" data-go="mine/orders.html">查看我的订单</button></div>'
+    }));
+  }
+
+  function bodyHTML() {
+    var p = progress();
+    var stages = ['待交割', '交割中', '已完成'];
+    var cur = dlv && dlv.status === '已完成' ? 2 : (paidOk ? 1 : 0);
+    return '<div class="card"><div class="cb">' +
+      '<div class="steps">' + stages.map(function (s, i) {
+        return '<div class="s ' + (i < cur ? 'done' : i === cur ? 'cur' : '') + '" data-n="' + (i + 1) + '">' + s + '</div>';
+      }).join('') + '</div>' +
+      '<div style="margin-top:12px;display:flex;align-items:center;gap:10px">' +
+      '<div style="flex:1;height:7px;background:var(--line2);border-radius:4px;overflow:hidden">' +
+      '<div style="width:' + Math.round(p.pct * 100) + '%;height:100%;background:var(--ok);border-radius:4px"></div></div>' +
+      '<span class="xs muted">' + p.done + ' / ' + p.total + ' 项</span></div>' +
+      (dlv ? '<div class="note ok" style="margin-top:10px"><span class="ni">✓</span><div>交割已完成，交割单 <span class="mono">' +
+        X.esc(dlv.delivery_id) + '</span> 双方签认，订单履约完成。</div></div>'
+        : (paidOk ? '<div class="note"><span class="ni">ⓘ</span><div>价款已付清，请按交割单约定时间提货。提货前请与现场联系人确认。</div></div>'
+          : '<div class="note warn"><span class="ni">⚠</span><div>价款尚未付清，暂不可提货。请先完成支付。</div></div>')) +
+      '</div></div>' +
+
+      APP.card('交割信息', APP.kvRows([
+        ['订单', '<span class="mono">' + X.esc(order.order_id) + '</span>'],
+        ['标的资产', X.esc(asset ? asset.asset_name : ASSET_TXT), 'left'],
+        ['交割方式', dlv ? X.esc(dlv.mode) : MODE],
+        ['提货地点', X.esc(asset ? (asset.location || '—') : (noAsset ? '按纸质合同约定' : '—')), 'left'],
+        ['提货截止', X.esc(perf ? perf.pickup_deadline : '—')],
+        ['提货人', dlv ? X.esc(dlv.pickup_person) : '待填写'],
+        ['证件号（脱敏）', dlv ? X.esc(dlv.id_no) : '待填写'],
+        ['交割单', dlv ? '<span class="mono small">' + X.esc(dlv.delivery_id) + '</span>' : '交割完成后生成']
+      ])) +
+
+      APP.card('分项交割清单', '<div class="checks">' + items().map(function (it) {
+        var cls = it.status === '已完成' ? 'ok' : it.status === '交割中' ? 'ok' : 'no';
+        return '<div class="ck ' + cls + '"><div class="ci">' + (it.status === '已完成' ? '✓' : it.status === '交割中' ? '…' : '·') + '</div>' +
+          '<div class="cm"><div class="ct">' + X.esc(it.name) + '</div>' +
+          '<div class="cd">' + APP.tag(it.status, it.status === '已完成' ? 'ok' : it.status === '交割中' ? 'pri' : '') +
+          (it.status === '挂起' ? ' <span class="xs muted">已挂起争议，订单保持交割中</span>' : '') + '</div></div>' +
+          (dlv ? '' : '<button class="btn sm ghost" data-hang="' + X.esc(it.name) + '">异常上报</button>') +
+          '</div>';
+      }).join('') + '</div>' +
+        '<div class="xs muted" style="margin-top:8px">支持<b>分项完成与部分挂起</b>：争议项挂起后订单保持「交割中」，不影响其他项交割。</div>') +
+
+      APP.card('交割时间轴', '<div class="tl">' +
+        '<div class="ti done"><div class="tt">成交确认</div><div class="tb">系统生成成交确认书并创建订单</div>' +
+        '<div class="tm">' + X.esc(order.create_time) + '</div></div>' +
+        (perf && perf.node_status.sign ? '<div class="ti done"><div class="tt">合同签署</div><div class="tb">电子签章生效</div><div class="tm">' + X.esc(perf.node_status.sign) + '</div></div>' : '') +
+        (perf && perf.node_status.pay ? '<div class="ti done"><div class="tt">价款付清</div><div class="tb">付款流水已入账，发票已开具</div><div class="tm">' + X.esc(perf.node_status.pay) + '</div></div>' : '') +
+        '<div class="ti ' + (dlv ? 'done' : paidOk ? 'cur' : '') + '"><div class="tt">交割提货</div>' +
+        '<div class="tb">' + (dlv ? '交割单双方签认，实物已交付' : paidOk ? '待现场提货并签署交割单' : '等待付款完成') + '</div>' +
+        '<div class="tm">' + X.esc(dlv ? dlv.time : (perf ? '截止 ' + perf.pickup_deadline : '—')) + '</div></div>' +
+        '</div>') +
+
+      (dlv ? APP.card('交割凭证', APP.kvRows([
+        ['凭证文件', '<span class="mono small">' + X.esc(dlv.file) + '</span>'],
+        ['交割时间', X.esc(dlv.time)],
+        ['状态', APP.tag(dlv.status, 'ok')]
+      ]) + '<button class="btn blk" data-toast="交割回单下载（原型演示）">下载交割回单</button>') : '') +
+
+      (isDemo ? '<div class="note gray"><span class="ni">ⓘ</span><div>本单由 APP 原型自举生成，用于演示签约 / 付款 / 交割链路。</div></div>' : '') +
+
+      APP.card('异常上报', '<div class="xs muted" style="margin-bottom:8px">若实物与公告不符、数量短缺或存在权属争议，可在此上报，平台将挂起对应分项并介入协调。</div>' +
+        '<button class="btn blk line-pri" id="report">上报交割异常</button>');
+  }
+
+  function barHTML() {
+    if (dlv) return '<div class="actionbar"><button class="btn lg grow" data-toast="交割回单下载（原型演示）">下载回单</button>' +
+      '<button class="btn pri lg grow" data-go="mine/orders.html">返回订单</button></div>';
+    if (!paidOk) return '<div class="actionbar"><button class="btn pri lg grow" data-go="trade/pay.html?order=' + order.order_id + '">去支付价款</button></div>';
+    return '<div class="actionbar"><button class="btn lg grow" data-go="mine/orders.html">我的订单</button>' +
+      '<button class="btn pri lg grow" id="confirm">确认完成交割</button></div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '交割进度', backTo: 'back', sideActive: '交割进度',
+      body: '<div style="padding:12px">' + bodyHTML() + '</div>', bar: barHTML()
+    }));
+    bind();
+  }
+
+  function bind() {
+    document.querySelectorAll('[data-hang]').forEach(function (b) {
+      b.onclick = function () { openReport(b.getAttribute('data-hang')); };
+    });
+    var rb = document.getElementById('report');
+    if (rb) rb.onclick = function () { openReport(''); };
+    var cb = document.getElementById('confirm');
+    if (!cb) return;
+    cb.onclick = function () {
+      var person = (me.contact_name || '张运输');
+      APP.sheet({
+        title: '确认完成交割',
+        body: '<div class="fld"><label>提货人姓名<span class="req">*</span></label><input id="pk" value="' + X.esc(person) + '"></div>' +
+          '<div class="fld"><label>证件号<span class="req">*</span></label><input id="idn" placeholder="18 位身份证号"></div>' +
+          '<div class="fld"><label>交割方式</label><select id="md">' + ['自提', '代运', '第三方仓库交割'].map(function (m) {
+            return '<option' + (m === MODE ? ' selected' : '') + '>' + m + '</option>';
+          }).join('') + '</select></div>' +
+          '<div class="fld"><label>交割凭证</label><div class="gcell" id="up" style="cursor:pointer;border:1px dashed var(--line);text-align:center">' +
+          '<div style="font-size:20px">📎</div><div class="xs muted" id="upT">上传交割回单（jpg / pdf）</div></div></div>' +
+          '<div class="xs muted">证件号将<b>加密存储、脱敏展示</b>，仅本人与授权角色可见。</div>',
+        foot: '<button class="btn grow" data-close="1">取消</button><button class="btn pri grow" id="okDlv">确认交割</button>',
+        onReady: function (w) {
+          w.querySelector('#up').onclick = function () {
+            var t = w.querySelector('#upT');
+            t.className = 'xs c-ok'; t.textContent = '✓ 已选择：交割回单.jpg（原型演示）';
+          };
+          w.querySelector('#okDlv').onclick = function () {
+            var pk = w.querySelector('#pk').value.trim();
+            var idn = w.querySelector('#idn').value.trim();
+            var md = w.querySelector('#md').value;
+            if (!pk) { APP.toast('请填写提货人姓名', 'err'); return; }
+            if (!/^\d{17}[\dXx]$/.test(idn)) { APP.toast('证件号格式不正确（18 位身份证号）', 'err'); return; }
+            var id = 'DLV-' + String(DB.all('deliveries').length + 1).padStart(4, '0');
+            var t = '2026-10-09 ' + WB.nowHM();
+            var it = items().map(function (x) { return { name: x.name, status: '已完成' }; });
+            DB.insert('deliveries', {
+              delivery_id: id, order_id: order.order_id, mode: md,
+              pickup_person: pk, id_no: idn.slice(0, 6) + '********' + idn.slice(-4),
+              time: t, file: '交割回单.jpg', status: '已完成', items: it, create_time: t
+            });
+            var ns = Object.assign({}, (perf && perf.node_status) || {});
+            ns.delivery = t;
+            DB.update('performance', perf.perf_id, { node_status: ns, status: '已完成' });
+            DB.update('orders', order.order_id, { status: '已完成' });
+            DB.audit('交割完成', order.order_id, '竞买人 ' + me.subject_name + ' 完成交割 ' + id +
+              '（方式 ' + md + '，提货人 ' + pk + '，' + it.length + ' 项全部完成）', { level: '重要', role: '竞买人' });
+            dlv = DB.get('deliveries', id);
+            perf = APP.perfOf(order.order_id);
+            order = DB.get('orders', order.order_id);
+            APP.closeSheets();
+            APP.toast('交割完成，订单履约结束', 'ok', 2600);
+            render();
+          };
+        }
+      });
+    };
+  }
+
+  function openReport(itemName) {
+    APP.sheet({
+      title: '上报交割异常',
+      body: '<div class="fld"><label>异常类型</label><select id="et">' +
+        ['数量短缺', '实物与公告不符', '权属争议', '现场无法提货', '其他'].map(function (t) { return '<option>' + t + '</option>'; }).join('') +
+        '</select></div>' +
+        (itemName ? '<div class="fld"><label>涉及分项</label><input value="' + X.esc(itemName) + '" readonly></div>' : '') +
+        '<div class="fld"><label>异常说明<span class="req">*</span></label>' +
+        '<textarea id="ed" rows="3" placeholder="请描述具体情况，便于平台介入协调"></textarea></div>' +
+        '<div class="note warn"><span class="ni">⚠</span><div>上报后该分项将<b>挂起争议</b>，订单保持「交割中」，其余分项可正常交割。' +
+        '挂起期间不计逾期违约。</div></div>',
+      foot: '<button class="btn grow" data-close="1">取消</button><button class="btn pri grow" id="okRep">提交上报</button>',
+      onReady: function (w) {
+        w.querySelector('#okRep').onclick = function () {
+          var ed = w.querySelector('#ed').value.trim();
+          if (!ed) { APP.toast('请填写异常说明', 'err'); return; }
+          var type = w.querySelector('#et').value;
+          var id = 'TKT-' + String(DB.all('tickets').length + 1).padStart(4, '0');
+          DB.insert('tickets', {
+            ticket_id: id, subject_id: me.subject_id, type: '交割争议',
+            title: type + '（订单 ' + order.order_id + (itemName ? ' · ' + itemName : '') + '）',
+            content: ed, status: '处理中', reply: '', create_time: '2026-10-09 ' + WB.nowHM(), reply_time: null
+          });
+          DB.audit('交割异常上报', order.order_id, '竞买人 ' + me.subject_name + ' 上报交割异常：' + type +
+            (itemName ? '（分项 ' + itemName + '）' : '') + '；工单 ' + id, { level: '重要', role: '竞买人' });
+          APP.closeSheets();
+          APP.toast('已上报，工单 ' + id + ' 已创建，平台将尽快介入', 'ok', 2800);
+        };
+      }
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

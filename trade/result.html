@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>成交结果 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  /* 优先展示「我竞得」的场次（这样应付金额明细与后续三节点时限才有意义），
+     其次展示任意已成交场次，最后回退到当前场次。 */
+  var ses = DB.get('sessions', qs.get('ses')) ||
+    APP.pickSession(function (s) { return s.deal_subject === me.subject_id; }) ||
+    APP.pickSession(function (s) { return s.deal_subject && (s.status === '已结束' || s.status === '已归档'); }) ||
+    APP.pickSession();
+  var asset = ses ? DB.get('assets', ses.asset_id) : null;
+  var deal = ses ? DB.find('deals', function (d) { return d.session_id === ses.session_id; }) : null;
+  var order = deal ? DB.find('orders', function (o) { return o.deal_id === deal.deal_id; }) : null;
+  var iWon = !!(deal && deal.buyer_id === me.subject_id);
+  var myReg = ses ? DB.find('bidRegs', function (r) { return r.session_id === ses.session_id && r.subject_id === me.subject_id && r.status !== '已取消'; }) : null;
+  var myBids = ses ? DB.all('bids').filter(function (b) { return b.session_id === ses.session_id && b.subject_id === me.subject_id; }) : [];
+  var topBid = ses ? DB.all('bids').filter(function (b) { return b.session_id === ses.session_id; }).sort(function (a, b) { return b.bid_seq - a.bid_seq; })[0] : null;
+
+  function bodyHTML() {
+    if (!ses || !asset) {
+      return '<div class="empty"><div class="ei">📄</div><div class="et">暂无可查看的竞价结果</div>' +
+        '<button class="btn line-pri sm" style="margin-top:10px" data-go="asset/list.html">去浏览资产</button></div>';
+    }
+    var finalPrice = deal ? deal.deal_price : (topBid ? topBid.bid_amount : ses.start_price);
+    var pay = order ? E.payable(order) : null;
+    /* X.pct() 接收的是比值（内部 ×100），此处不能再乘 100，否则溢价率会被放大 100 倍 */
+    var premium = ses.start_price ? (finalPrice / ses.start_price - 1) : 0;
+
+    /* 结果横幅：成交 / 流拍 / 未中拍 */
+    var banner;
+    if (deal) {
+      banner = '<div class="card" style="border:0;background:linear-gradient(150deg,#12a150,#0b7a3c);color:#fff">' +
+        '<div class="cb center" style="padding:20px 14px">' +
+        '<div style="font-size:40px">🏆</div>' +
+        '<div style="font-size:17px;font-weight:700;margin-top:6px">' + (iWon ? '恭喜您竞得本标的' : '本场次已成交') + '</div>' +
+        '<div style="font-size:30px;font-weight:700;margin-top:6px">' + X.w(finalPrice) + '<span style="font-size:14px">万元</span></div>' +
+        '<div style="font-size:12px;opacity:.9;margin-top:4px">成交确认书已生成　溢价 ' + X.pct(premium) + '</div>' +
+        '</div></div>';
+    } else if (ses.meet_reserve === false) {
+      banner = '<div class="card" style="border:0;background:linear-gradient(150deg,#e08a00,#b56f00);color:#fff">' +
+        '<div class="cb center" style="padding:20px 14px">' +
+        '<div style="font-size:40px">📉</div>' +
+        '<div style="font-size:17px;font-weight:700;margin-top:6px">本次流拍</div>' +
+        '<div style="font-size:12.5px;opacity:.95;margin-top:6px">最高出价未达委托方保留价，本次流拍。<br>保留价不对外展示，流拍原因由系统判定并留痕。</div>' +
+        '</div></div>';
+    } else {
+      banner = '<div class="card"><div class="cb center" style="padding:20px 14px">' +
+        '<div style="font-size:40px">🙂</div>' +
+        '<div style="font-size:16px;font-weight:700;margin-top:6px">很遗憾，您未中拍</div>' +
+        '<div class="xs muted" style="margin-top:6px">保证金将在竞价结束后 3 个工作日内原路解冻</div>' +
+        '</div></div>';
+    }
+
+    var mine = APP.card('我的参与情况', APP.kvRows([
+      ['是否报名', myReg ? APP.tag('已报名', 'ok') : APP.tag('未报名', '')],
+      ['我的出价次数', myBids.length + ' 次'],
+      ['我的最高出价', myBids.length ? '<b>¥' + X.yuan(Math.max.apply(null, myBids.map(function (b) { return b.bid_amount; }))) + '</b>' : '—'],
+      ['出价状态', myBids.length ? (iWon ? APP.tag('领先并成交', 'ok') : APP.tag('被超越', '')) : '—']
+    ]));
+
+    var payCard = '';
+    if (order && iWon) {
+      payCard = APP.card('应付金额明细', '<div style="border:1px dashed var(--line);border-radius:10px;padding:10px;font-size:12.5px;line-height:2">' +
+        '成交价　　<b class="money">¥' + X.yuan(pay.deal) + '</b><br>' +
+        '＋ 佣金（' + X.pct(pay.commissionRate) + '）　<b class="money">¥' + X.yuan(pay.commission) + '</b><br>' +
+        '＋ 税费（' + X.pct(order.tax_rate) + '）　<b class="money">¥' + X.yuan(pay.tax) + '</b><br>' +
+        '− 保证金抵扣　<b class="money c-ok">¥' + X.yuan(pay.depositOffset) + '</b><br>' +
+        '<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px">应付总额　<b class="price" style="font-size:18px">¥' + X.yuan(pay.total) + '</b></div>' +
+        '</div>' +
+        '<div class="xs muted" style="margin-top:7px">' + X.esc(pay.explain) + '</div>') +
+      APP.card('后续步骤与时限', '<div class="tl">' +
+        node('① 签署合同', '须在 48 小时内完成电子签约', APP.perfOf(order.order_id) ? APP.perfOf(order.order_id).sign_deadline : '—', !!(APP.perfOf(order.order_id) && APP.perfOf(order.order_id).node_status.sign), 'trade/contract.html?order=' + order.order_id) +
+        node('② 支付价款', '须在 7 日内付清全部价款', APP.perfOf(order.order_id) ? APP.perfOf(order.order_id).pay_deadline : '—', !!(APP.perfOf(order.order_id) && APP.perfOf(order.order_id).node_status.pay), 'trade/pay.html?order=' + order.order_id) +
+        node('③ 交割提货', '须在 30 日内完成交割', APP.perfOf(order.order_id) ? APP.perfOf(order.order_id).pickup_deadline : '—', !!(APP.perfOf(order.order_id) && APP.perfOf(order.order_id).node_status.delivery), 'trade/delivery.html?order=' + order.order_id) +
+        '</div>' +
+        '<div class="note warn" style="margin-top:8px"><span class="ni">⚠</span><div>逾期未签约或未付款将触发违约认定，保证金不予退还，并按规定列入名单、下调信用分与主体分级。</div></div>');
+    }
+
+    return banner +
+      APP.card('成交信息', APP.kvRows([
+        ['资产', X.esc(asset.asset_name), 'left'],
+        ['场次', X.esc(ses.session_id)],
+        ['成交时间', X.esc(deal ? deal.deal_time : X.fmtDT(ses.bid_end))],
+        ['起拍价', '¥' + X.yuan(ses.start_price)],
+        ['成交价', '<b class="c-pri">¥' + X.yuan(finalPrice) + '</b>'],
+        ['溢价率', X.pct(premium)],
+        ['买受人', deal ? (iWon ? '<b>您（' + X.esc(me.subject_name) + '）</b>' : '其他竞买人（身份已隐去）') : '—'],
+        ['成交确认书', deal ? '<span class="mono small">' + X.esc(deal.confirm_file) + '</span> <button class="btn sm ghost" data-toast="成交确认书下载（原型演示）">下载</button>' : '—', 'left']
+      ]) +
+      /* 隐私口径：无论本人是否竞得，其他参与方的身份一律隐去（PRD：出价记录隐去他人身份） */
+      '<div class="xs muted" style="margin-top:7px">除买受人外，其他竞买人的<b>身份已隐去</b>，出价记录只展示脱敏编号，平台不对外披露参与方信息。</div>') +
+      mine + payCard +
+      APP.card('推荐相似资产', similarHTML()) +
+      APP.card('接下来', '<div class="list">' +
+        '<a class="li" data-go="mine/bids.html"><div class="li-main"><div class="li-t">我的竞拍</div><div class="li-s">查看我参与的全部场次与出价记录</div></div><span class="arrow">›</span></a>' +
+        '<a class="li" data-go="asset/list.html?cat=' + encodeURIComponent(asset.category) + '"><div class="li-main"><div class="li-t">同类资产</div><div class="li-s">按此品类继续浏览</div></div><span class="arrow">›</span></a>' +
+        (deal && !iWon ? '<a class="li" data-go="mine/subscription.html"><div class="li-main"><div class="li-t">订阅同类提醒</div><div class="li-s">有相似资产上线时第一时间通知</div></div><span class="arrow">›</span></a>' : '') +
+        '</div>');
+  }
+
+  function node(t, s, dl, done, href) {
+    return '<div class="ti ' + (done ? 'done' : 'cur') + '"><div class="tt">' + t + ' ' +
+      (done ? APP.tag('已完成', 'ok') : APP.tag('待办理', 'warn')) + '</div>' +
+      '<div class="tb">' + s + '<br>截止 ' + X.esc(dl) + '</div>' +
+      '<div class="tm"><button class="btn sm ' + (done ? 'ghost' : 'line-pri') + '" data-go="' + href + '">' +
+      (done ? '查看详情' : '去办理') + '</button></div></div>';
+  }
+
+  function similarHTML() {
+    var list = DB.all('assets').filter(function (a) {
+      return a.category === asset.category && a.asset_id !== asset.asset_id && a.asset_status !== '已关闭';
+    }).slice(0, 3);
+    if (!list.length) return '<div class="empty" style="padding:20px 0"><div class="et">暂无同类在售资产</div></div>';
+    return list.map(function (a) {
+      return '<a class="li" data-go="asset/detail.html?id=' + a.asset_id + '" style="text-decoration:none;color:inherit">' +
+        '<span style="font-size:20px">' + APP.catIcon(a.category) + '</span>' +
+        '<div class="li-main"><div class="li-t">' + X.esc(a.asset_name) + '</div>' +
+        '<div class="li-s">' + X.esc(a.region || '') + ' · 起拍 ' + X.w(a.start_price) + ' 万</div></div>' +
+        '<span class="arrow">›</span></a>';
+    }).join('');
+  }
+
+  function barHTML() {
+    if (deal && iWon && order) {
+      return '<div class="actionbar">' +
+        '<button class="btn lg grow" data-go="mine/orders.html">我的订单</button>' +
+        '<button class="btn pri lg grow" data-go="trade/contract.html?order=' + order.order_id + '">去签署合同</button></div>';
+    }
+    return '<div class="actionbar"><button class="btn lg grow" data-go="mine/bids.html">我的竞拍</button>' +
+      '<button class="btn pri lg grow" data-go="asset/list.html">继续浏览</button></div>';
+  }
+
+  APP.mount(APP.shell({
+    title: '成交结果', backTo: 'back', sideActive: '成交结果',
+    body: '<div style="padding:12px">' + bodyHTML() + '</div>', bar: barHTML()
+  }));
+})();
+</script>
+</body>
+</html>

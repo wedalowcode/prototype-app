@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>合同签署 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var order = APP.pickOrder(qs.get('order'));
+  if (!order) { empty(); return; }
+  var asset = order.asset_id ? DB.get('assets', order.asset_id) : null;
+  /* 历史存量订单（种子中 asset_id 为 null）没有线上资产，与后台「订单详情」同一口径标注，
+     不能显示成裸「—」，否则合同正文会出现「标的物：—，数量 ，存放地 —」这种断句。 */
+  var noAsset = !asset;
+  var ASSET_TXT = noAsset ? '历史存量订单，无线上资产' : null;
+  var perf = APP.perfOf(order.order_id);
+  var ct = DB.find('contracts', function (c) { return c.order_id === order.order_id; });
+  var pay = E.payable(order);
+  var isDemo = String(order.order_no).indexOf('DEMO') === 0;
+  var signed = !!(ct && ct.status === '已生效');
+
+  function empty() {
+    APP.mount(APP.shell({
+      title: '合同签署', backTo: 'back', sideActive: '合同签署',
+      body: '<div class="empty"><div class="ei">📝</div><div class="et">暂无待签署的合同</div>' +
+        '<div class="es">竞得标的后系统会自动生成合同</div>' +
+        '<button class="btn line-pri sm" style="margin-top:10px" data-go="asset/list.html">去浏览资产</button></div>'
+    }));
+  }
+
+  function bodyHTML() {
+    var dl = perf ? perf.sign_deadline : '—';
+    var overdue = perf && perf.is_overdue && !signed;
+    return '<div class="card"><div class="cb center">' +
+      '<div style="font-size:38px">' + (signed ? '✅' : '📝') + '</div>' +
+      '<div class="bold" style="font-size:16px;margin-top:6px">' + (signed ? '合同已生效' : '待签署资产交易合同') + '</div>' +
+      '<div class="xs muted" style="margin-top:4px">订单 ' + X.esc(order.order_id) +
+      (isDemo ? ' ' + APP.tag('原型自举', 'warn') : '') + '</div>' +
+      (signed ? '' : '<div class="note ' + (overdue ? 'danger' : 'warn') + '" style="margin-top:9px;text-align:left"><span class="ni">⏰</span><div>' +
+        '签署截止 <b>' + X.esc(dl) + '</b>' + (overdue ? '（<b class="c-danger">已逾期</b>，逾期将触发违约认定）' : '，逾期未签将触发违约认定（BT01）') + '</div></div>') +
+      '</div></div>' +
+
+      APP.card('合同要素', APP.kvRows([
+        ['合同编号', ct ? '<span class="mono">' + X.esc(ct.contract_id) + '</span>' : '签署后生成'],
+        ['合同模板', X.esc(ct ? ct.template : '资产交易合同（标准版）'), 'left'],
+        ['标的资产', X.esc(asset ? asset.asset_name : ASSET_TXT), 'left'],
+        ['甲方（处置方）', X.esc(asset ? asset.disposal_org : (noAsset ? '—（历史存量订单未记录处置单位）' : '—')), 'left'],
+        ['乙方（竞买人）', X.esc(me.subject_name), 'left'],
+        ['成交价', '¥' + X.yuan(order.deal_price)],
+        ['应付总额', '<b class="price">¥' + X.yuan(order.total_amount) + '</b>'],
+        ['签署状态', ct ? APP.tag(ct.status, 'ok') : APP.tag('待签署', 'warn')]
+      ])) +
+
+      APP.card('合同正文（预览）', '<div style="max-height:150px;overflow-y:auto;font-size:12.5px;color:var(--ink2);border:1px solid var(--line);border-radius:9px;padding:10px;line-height:1.8">' +
+        '<b>资产交易合同（标准版）</b><br><br>' +
+        '甲方：' + X.esc(asset ? asset.disposal_org : '—（历史存量订单）') + '<br>' +
+        '乙方：' + X.esc(me.subject_name) + '（统一社会信用代码 ' + X.esc(me.uscc) + '）<br><br>' +
+        (noAsset
+          ? '第一条　标的物：' + X.esc(order.category) + '类资产（历史存量订单，线上未登记具体标的物与存放地，以纸质合同为准）。<br>'
+          : '第一条　标的物：' + X.esc(asset.asset_name) + '，数量 ' + X.esc(asset.qty) + ' ' + X.esc(asset.unit) +
+            '，存放地 ' + X.esc(asset.location || '—') + '。<br>') +
+        '第二条　成交价款：人民币 ¥' + X.yuan(order.deal_price) + '（大写见签章页），另需支付佣金与税费，' +
+        '保证金 ¥' + X.yuan(order.deposit_offset) + ' 转为价款抵扣。<br>' +
+        '第三条　付款期限：乙方应于本合同签署之日起 7 日内付清全部应付款项。<br>' +
+        '第四条　交割：乙方应于 30 日内完成提货，交割以交割单双方签认之日为准。<br>' +
+        '第五条　违约责任：乙方逾期未签约或未付款的，甲方有权没收保证金，并按平台规则执行处罚。<br>' +
+        '第六条　标的物以现状交付，甲方不对质量与数量作保证，乙方已现场看样确认。<br>' +
+        '第七条　争议解决：因本合同发生争议，双方协商解决；协商不成，提交甲方所在地人民法院诉讼解决。<br>' +
+        '第八条　本合同经双方电子签章后生效，与纸质合同具有同等法律效力。' +
+        '</div>') +
+
+      (signed
+        ? APP.card('签署信息', APP.kvRows([
+            ['甲方签章', X.esc(ct.signer_seller) + '　' + APP.tag('已签章', 'ok')],
+            ['乙方签章', X.esc(ct.signer_buyer) + '　' + APP.tag('已签章', 'ok')],
+            ['签署时间', X.esc(ct.sign_time)],
+            ['合同文件', '<span class="mono small">' + X.esc(ct.file) + '</span>']
+          ]) + '<button class="btn blk" data-toast="合同下载（原型演示）">下载合同 PDF</button>' +
+            '<button class="btn blk line-pri" style="margin-top:8px" data-go="trade/pay.html?order=' + order.order_id + '">去支付价款</button>')
+        : APP.card('电子签章', '<div class="fld"><label>签署人姓名<span class="req">*</span></label>' +
+            '<input id="signer" value="' + X.esc(me.legal_person || me.contact_name || '') + '" placeholder="法定代表人 / 授权代表"></div>' +
+            '<div class="fld"><label>签署人证件号（脱敏展示）</label>' +
+            '<input value="' + X.esc('11010119**0312****') + '" readonly></div>' +
+            '<label style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px">' +
+            '<input type="checkbox" id="agree" style="width:auto;margin-top:3px">' +
+            '<span>我已完整阅读合同全文，确认条款无误，自愿签署。</span></label>' +
+            '<div class="xs muted" style="margin-top:8px">企业签署需由法定代表人或有授权委托书的授权代表完成；签章使用平台 CA 证书，签章记录不可篡改、可验签。</div>')) +
+      (isDemo ? '<div class="note gray"><span class="ni">ⓘ</span><div>本单由 APP 原型自举生成，用于演示签约 / 付款 / 交割链路；本主体真实的已完成订单见「我的订单」。</div></div>' : '');
+  }
+
+  function barHTML() {
+    if (signed) return '<div class="actionbar"><button class="btn lg grow" data-toast="合同下载（原型演示）">下载合同</button>' +
+      '<button class="btn pri lg grow" data-go="trade/pay.html?order=' + order.order_id + '">去支付</button></div>';
+    return '<div class="actionbar"><button class="btn lg grow" data-go="mine/orders.html">我的订单</button>' +
+      '<button class="btn pri lg grow" id="sign">确认签署</button></div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '合同签署', backTo: 'back', sideActive: '合同签署',
+      body: '<div style="padding:12px">' + bodyHTML() + '</div>', bar: barHTML()
+    }));
+    bind();
+  }
+
+  function bind() {
+    var sb = document.getElementById('sign');
+    if (!sb) return;
+    sb.onclick = function () {
+      var name = (document.getElementById('signer') || {}).value || '';
+      var ag = document.getElementById('agree');
+      if (!name.trim()) { APP.toast('请填写签署人姓名', 'err'); return; }
+      if (!ag || !ag.checked) { APP.toast('请勾选确认已阅读合同全文', 'err'); return; }
+      APP.dialog({
+        title: '确认签署合同',
+        body: '签署人：<b>' + X.esc(name.trim()) + '</b><br>标的：' + X.esc(asset ? asset.asset_name : '') +
+          '<br><span class="xs muted">签署后将生成电子签章并写入不可篡改的签署记录，合同立即生效。</span>',
+        okText: '确认签署',
+        onOk: function () {
+          var id = 'CT-' + String(DB.all('contracts').length + 1).padStart(4, '0');
+          var t = '2026-10-09 ' + WB.nowHM();
+          DB.insert('contracts', {
+            contract_id: id, order_id: order.order_id, template: '资产交易合同（标准版）',
+            signer_buyer: name.trim(), signer_seller: '中油资产处置中心', sign_time: t,
+            status: '已生效', file: '合同-' + order.order_no + '.pdf', create_time: t
+          });
+          var ns = Object.assign({}, (perf && perf.node_status) || {});
+          ns.sign = t;
+          DB.update('performance', perf.perf_id, { node_status: ns, status: '已签约' });
+          DB.update('orders', order.order_id, { status: '已签约' });
+          DB.audit('合同签署', order.order_id, '竞买人 ' + me.subject_name + ' 签署资产交易合同 ' + id +
+            '（签署人 ' + name.trim() + '，电子签章，订单状态 待签约 → 已签约）', { level: '重要', role: '竞买人' });
+          ct = DB.get('contracts', id);
+          perf = APP.perfOf(order.order_id);
+          order = DB.get('orders', order.order_id);
+          signed = true;
+          APP.toast('合同已生效，请及时支付价款', 'ok', 2600);
+          render();
+        }
+      });
+    };
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

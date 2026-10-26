@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>订阅与偏好 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  APP.refreshSubCounts();               /* 命中数由条件实时计算后回写，不写死 */
+  var me = APP.me();
+
+  var CATS = DICT.category;
+  var REGIONS = DICT.region;
+  var CHANNELS = DICT.channels;
+
+  /* 全局触达偏好（本地偏好，不落业务库） */
+  var PREF_KEY = 'zyypk_app_reach_pref';
+  function pref() {
+    try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch (e) { return {}; }
+  }
+  function setPref(p) { localStorage.setItem(PREF_KEY, JSON.stringify(p)); }
+
+  /* 兴趣负反馈：act_type='不感兴趣' 的事实（30 天内有效，由推荐引擎真实排除） */
+  function negFacts() {
+    return DB.all('interests').filter(function (f) {
+      return f.subject_id === me.subject_id && f.act_type === '不感兴趣' && f.is_valid;
+    });
+  }
+  function negActive(f) { return U.daysBetween(f.act_time, WB.TODAY) <= 30; }
+
+  /* ---------- 订阅规则卡片 ---------- */
+  function chipList(arr, emptyText) {
+    if (!arr || !arr.length) return '<span class="xs muted">' + X.esc(emptyText) + '</span>';
+    return arr.map(function (t) { return APP.tag(t, ''); }).join(' ');
+  }
+
+  function subCard(r) {
+    var on = r.status === '生效';
+    var hit = APP.subCount(r);
+    return '<div class="card" data-subcard="' + X.esc(r.rule_id) + '">' +
+      '<div class="ch"><h3>' + X.esc(r.code) + '</h3>' +
+      '<span class="sub">' + APP.tag(r.status, on ? 'ok' : '') + ' ' + APP.tag(r.version, 'info') + '</span></div>' +
+      '<div class="cb">' +
+      APP.kvRows([
+        ['品类', chipList(r.categories, '不限品类'), 'left'],
+        ['区域', chipList(r.regions, '不限区域'), 'left'],
+        ['价格区间', X.esc(APP.priceRange(r.price_min, r.price_max)), 'left'],
+        ['触达渠道', chipList(r.channels, '未设置（不触达）'), 'left'],
+        ['创建时间', X.esc(r.create_time || '—'), 'left']
+      ]) +
+      '<div class="note' + (r.retired ? ' gray' : '') + '" style="margin-top:9px">' +
+      '<span class="ni">' + (r.retired ? '⛔' : 'ⓘ') + '</span><div>' +
+      (r.retired
+        ? '该订阅已<b>退订</b>（' + X.esc(r.retire_time || '') + '）。按规则不物理删除，记录保留可追溯；如需恢复请「启用」。'
+        : '按当前条件实时匹配到 <b class="c-pri">' + hit + '</b> 项在售资产' +
+          (r.match_count !== hit ? '（上次统计 ' + (r.match_count || 0) + ' 项，已按最新在售资产刷新）' : '') + '。') +
+      '</div></div>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-top:11px;flex-wrap:wrap">' +
+      '<div class="sw"><input type="checkbox" id="sw-' + X.esc(r.rule_id) + '" data-tog="' + X.esc(r.rule_id) + '"' +
+      (on ? ' checked' : '') + '><label class="tr" for="sw-' + X.esc(r.rule_id) + '"></label></div>' +
+      '<span class="xs muted" style="flex:1">' + (on ? '接收提醒' : '已停用') + '</span>' +
+      '<button class="btn sm" data-hit="' + X.esc(r.rule_id) + '">命中 ' + hit + ' 条</button>' +
+      '<button class="btn sm" data-edit="' + X.esc(r.rule_id) + '">编辑</button>' +
+      (r.retired ? '' : '<button class="btn sm line-pri" data-retire="' + X.esc(r.rule_id) + '">退订</button>') +
+      '</div>' +
+      '</div></div>';
+  }
+
+  /* ---------- 兴趣品类偏好 ---------- */
+  function interestCard() {
+    var ci = E.categoryInterest(me.subject_id).slice(0, 8);
+    var max = ci.length ? ci[0].weight : 1;
+    var blocked = negFacts();
+    var active = blocked.filter(negActive);
+    var blockedCats = {};
+    active.forEach(function (f) { blockedCats[f.category] = f; });
+
+    return APP.card('兴趣品类（由行为事实实时推导）',
+      (ci.length
+        ? ci.map(function (c) {
+            var b = blockedCats[c.category];
+            return '<div style="display:flex;align-items:center;gap:9px;padding:6px 0">' +
+              '<span style="font-size:17px">' + APP.catIcon(c.category) + '</span>' +
+              '<div style="flex:1;min-width:0">' +
+              '<div style="display:flex;justify-content:space-between;font-size:12.5px">' +
+              '<span>' + X.esc(c.category) + (b ? ' <span class="tag danger">已屏蔽 30 天</span>' : '') + '</span>' +
+              '<span class="muted">权重 ' + c.weight + '</span></div>' +
+              '<div class="bar' + (b ? ' soft' : '') + '" style="margin-top:4px"><i style="width:' +
+              Math.max(4, Math.round(c.weight / max * 100)) + '%"></i></div></div>' +
+              '<button class="btn sm' + (b ? '' : ' ghost') + '" data-neg="' + X.esc(c.category) + '">' +
+              (b ? '撤销' : '减少') + '</button></div>';
+          }).join('')
+        : '<div class="empty" style="padding:24px 10px"><div class="ei">🧭</div><div class="et">行为数据不足，暂无法推导兴趣</div></div>') +
+      '<div class="note gray" style="margin-top:10px"><span class="ni">ⓘ</span><div>' +
+      '兴趣由 <b>InterestFact</b>（浏览 / 收藏 / 看样 / 订阅 / 报名 / 出价 / 成交）按半衰期 30 天实时加权得出，' +
+      '不是可手工填写的字段。<br>' +
+      '点「减少」会写入一条 <b>不感兴趣</b> 事实，推荐引擎据此<b>真实排除</b>该品类，30 天后自动失效；' +
+      '点「撤销」将该事实作废（不物理删除）。</div></div>' +
+      (blocked.length
+        ? '<div style="margin-top:10px"><div class="xs muted" style="margin-bottom:6px">负反馈事实（' + blocked.length + ' 条，' +
+          active.length + ' 条生效中）</div>' +
+          blocked.map(function (f) {
+            var live = negActive(f);
+            return '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid var(--line2);font-size:11.5px">' +
+              '<span class="mono muted">' + X.esc(f.fact_id) + '</span>' +
+              '<span style="flex:1">' + X.esc(f.category) + '</span>' +
+              '<span class="muted">' + X.esc(f.act_time) + '</span>' +
+              APP.tag(live ? '生效中' : '已失效', live ? 'danger' : '') + '</div>';
+          }).join('') + '</div>'
+        : ''), ci.length ? ci.length + ' 个品类' : '');
+  }
+
+  /* ---------- 触达设置 ---------- */
+  function reachCard() {
+    var p = pref();
+    var defs = [
+      ['站内信', 'APP 消息中心，全量记录'],
+      ['APP 推送', '系统通知栏实时提醒'],
+      ['短信', '重要节点短信提醒'],
+      ['邮件', '发送至企业邮箱']
+    ];
+    return APP.card('触达设置', defs.map(function (d) {
+      var on = p[d[0]] !== false;
+      return '<div class="sw-row"><div class="sr-m"><div class="sr-t">' + d[0] + '</div>' +
+        '<div class="sr-s">' + d[1] + '</div></div>' +
+        '<div class="sw"><input type="checkbox" id="rp-' + d[0] + '" data-pref="' + d[0] + '"' + (on ? ' checked' : '') +
+        '><label class="tr" for="rp-' + d[0] + '"></label></div></div>';
+    }).join('') +
+    '<div class="sw-row"><div class="sr-m"><div class="sr-t">免打扰时段</div>' +
+    '<div class="sr-s">22:00 - 08:00 不推送（站内信仍记录）</div></div>' +
+    '<div class="sw"><input type="checkbox" id="rp-dnd" data-pref="__dnd"' + (p.__dnd !== false ? ' checked' : '') +
+    '><label class="tr" for="rp-dnd"></label></div></div>' +
+    '<div class="note warn" style="margin-top:9px"><span class="ni">⚠</span><div>' +
+    '触达渠道只是「用户偏好」，<b>不改变业务规则</b>。保证金截止、合同签署、付款逾期等关键节点的站内信与短信' +
+    '不受免打扰影响（PRD 文案规范：关键节点必须触达）。</div></div>');
+  }
+
+  /* ---------- 页面 ---------- */
+  function bodyHTML() {
+    var list = APP.mySubs();
+    var totalHit = 0;
+    list.forEach(function (r) { totalHit += APP.subCount(r); });
+
+    return '<div class="note" style="margin-bottom:10px"><span class="ni">ⓘ</span><div>' +
+      '订阅是<b>独立业务对象</b>（Subscription，落在 rules 集合），不是账户上的一个开关。' +
+      '「条件命中 → 按渠道触达」，条件为 品类 + 区域 + 价格区间的交集。<br>' +
+      '退订<b>立即生效</b>，但按规则不物理删除，记录保留可追溯。</div></div>' +
+
+      '<div class="grid3" style="margin-bottom:10px">' +
+      g('订阅规则', list.length) +
+      g('生效中', list.filter(function (r) { return r.status === '生效'; }).length) +
+      g('命中资产', totalHit) +
+      '</div>' +
+
+      (list.length
+        ? list.map(subCard).join('')
+        : '<div class="empty"><div class="ei">🔔</div><div class="et">还没有订阅规则</div>' +
+          '<div class="es">按品类 / 区域 / 价格区间订阅，有新资产上架时第一时间提醒</div></div>') +
+
+      '<button class="btn pri blk lg" data-new="1" style="margin:4px 0 12px">＋ 新建订阅规则</button>' +
+
+      interestCard() +
+      reachCard() +
+
+      '<div style="height:6px"></div>';
+  }
+  function g(l, v) { return '<div class="gcell"><div class="gv">' + v + '</div><div class="gl">' + l + '</div></div>'; }
+
+  /* ---------- 新建 / 编辑表单 ---------- */
+  function openSubForm(ruleId) {
+    var r = ruleId ? DB.get('rules', ruleId) : null;
+    var sel = {
+      categories: r ? (r.categories || []).slice() : [],
+      regions: r ? (r.regions || []).slice() : [],
+      channels: r ? (r.channels || []).slice() : ['APP 推送'],
+      price_min: r ? (r.price_min || 0) : 0,
+      price_max: r ? (r.price_max || 0) : 0
+    };
+    function chips(kind, vals, picked) {
+      return '<div class="chips">' + vals.map(function (v) {
+        return '<button data-chip="' + kind + ':' + X.esc(v) + '" class="' + (picked.indexOf(v) >= 0 ? 'on' : '') + '">' +
+          X.esc(v) + '</button>';
+      }).join('') + '</div>';
+    }
+    var body =
+      '<div class="fld"><label>品类（可多选，不选＝不限）</label>' + chips('cat', CATS, sel.categories) + '</div>' +
+      '<div class="fld"><label>区域（可多选，不选＝不限）</label>' + chips('reg', REGIONS, sel.regions) + '</div>' +
+      '<div class="fld"><label>价格区间（万元，0 或留空＝不限）</label>' +
+      '<div style="display:flex;align-items:center;gap:8px">' +
+      '<input type="number" data-num="price_min" min="0" step="1" placeholder="下限" value="' + (sel.price_min ? sel.price_min / 10000 : '') + '" style="flex:1">' +
+      '<span class="muted">~</span>' +
+      '<input type="number" data-num="price_max" min="0" step="1" placeholder="上限" value="' + (sel.price_max ? sel.price_max / 10000 : '') + '" style="flex:1">' +
+      '</div><div class="help">起拍价落在 [下限, 上限] 区间内即命中；上限留空表示不设上限。</div></div>' +
+      '<div class="fld"><label>触达渠道（可多选）</label>' + chips('ch', CHANNELS, sel.channels) + '</div>' +
+      '<div class="note" id="hitPreview"></div>';
+
+    var wrap = APP.sheet({
+      title: ruleId ? '编辑订阅规则 ' + r.code : '新建订阅规则',
+      body: body,
+      foot: '<button class="btn grow" data-close="1">取消</button>' +
+        '<button class="btn pri grow" data-submit="1">' + (ruleId ? '保存修改' : '创建订阅') + '</button>',
+      onReady: function (w) {
+        function preview() {
+          var probe = { categories: sel.categories, regions: sel.regions, price_min: sel.price_min, price_max: sel.price_max };
+          w.querySelector('#hitPreview').innerHTML = '<span class="ni">ⓘ</span><div>按当前条件实时匹配到 <b class="c-pri">' +
+            APP.matchSubAssets(probe).length + '</b> 项在售资产' +
+            (sel.channels.length ? '，命中后按 ' + sel.channels.join(' / ') + ' 触达' : '；未选渠道将只记录不推送') + '</div>';
+        }
+        w.querySelectorAll('[data-chip]').forEach(function (b) {
+          b.onclick = function () {
+            var v = b.getAttribute('data-chip'), i = v.indexOf(':'), k = v.slice(0, i), val = v.slice(i + 1);
+            var arr = k === 'cat' ? sel.categories : k === 'reg' ? sel.regions : sel.channels;
+            var j = arr.indexOf(val);
+            if (j >= 0) arr.splice(j, 1); else arr.push(val);
+            b.classList.toggle('on', j < 0);
+            preview();
+          };
+        });
+        w.querySelectorAll('[data-num]').forEach(function (inp) {
+          inp.oninput = function () {
+            sel[inp.getAttribute('data-num')] = inp.value === '' ? 0 : Number(inp.value) * 10000;
+            preview();
+          };
+        });
+        w.querySelector('[data-submit]').onclick = function () {
+          if (!sel.categories.length && !sel.regions.length && !sel.price_min && !sel.price_max) {
+            APP.toast('请至少设置一个订阅条件（品类 / 区域 / 价格区间）', 'err');
+            return;
+          }
+          if (sel.price_min && sel.price_max && sel.price_min > sel.price_max) {
+            APP.toast('价格下限不能高于上限', 'err');
+            return;
+          }
+          var rec = APP.subSave(sel, ruleId);
+          w.remove();
+          render();
+          APP.toast((ruleId ? '订阅规则已更新' : '订阅已创建 ' + rec.code) + '，命中 ' + APP.subCount(rec) + ' 项在售资产', 'ok');
+        };
+        preview();
+      }
+    });
+    return wrap;
+  }
+
+  /* ---------- 命中资产下钻 ---------- */
+  function openHits(ruleId) {
+    var r = DB.get('rules', ruleId);
+    var hits = APP.matchSubAssets(r);
+    APP.sheet({
+      title: r.code + ' · 命中 ' + hits.length + ' 项',
+      body: '<div class="note" style="margin-bottom:9px"><span class="ni">ⓘ</span><div>' +
+        '条件：' + chipList(r.categories, '不限品类') + ' ｜ ' + chipList(r.regions, '不限区域') +
+        ' ｜ ' + X.esc(APP.priceRange(r.price_min, r.price_max)) + '</div></div>' +
+        (hits.length
+          ? '<div class="list">' + hits.map(function (a) {
+              var ses = DB.find('sessions', function (s) { return s.asset_id === a.asset_id; });
+              return '<a class="li" data-go="asset/detail.html?id=' + encodeURIComponent(a.asset_id) + '">' +
+                '<span style="font-size:18px">' + APP.catIcon(a.category) + '</span>' +
+                '<div class="li-main"><div class="li-t">' + X.esc(a.asset_name) + '</div>' +
+                '<div class="li-s">' + X.esc(a.category) + ' · ' + X.esc(a.region) + ' · ' + X.esc(a.asset_code) +
+                (ses ? ' · 场次 ' + X.esc(ses.session_id) + ' ' + X.esc(ses.status) : ' · 尚未开拍') + '</div></div>' +
+                '<div class="li-r"><div class="price">¥' + X.w(a.start_price) + '<span class="u">万</span></div>' +
+                '<div class="xs muted">起拍价</div></div><span class="arrow">›</span></a>';
+            }).join('') + '</div>'
+          : '<div class="empty"><div class="ei">🔍</div><div class="et">当前没有匹配的在售资产</div>' +
+            '<div class="es">条件偏窄，可放宽品类或价格区间</div></div>')
+    });
+  }
+
+  /* ---------- 渲染与绑定 ---------- */
+  function render() {
+    APP.mount(APP.shell({
+      title: '订阅与偏好', tab: 'mine', sideActive: '订阅与偏好',
+      body: bodyHTML()
+    }));
+    bind();
+  }
+
+  function bind() {
+    var list = APP.mySubs();
+
+    document.querySelectorAll('[data-new]').forEach(function (b) { b.onclick = function () { openSubForm(null); }; });
+    document.querySelectorAll('[data-edit]').forEach(function (b) {
+      b.onclick = function () { openSubForm(b.getAttribute('data-edit')); };
+    });
+    document.querySelectorAll('[data-hit]').forEach(function (b) {
+      b.onclick = function () { openHits(b.getAttribute('data-hit')); };
+    });
+
+    /* 启停：真实改 rules.status */
+    document.querySelectorAll('[data-tog]').forEach(function (b) {
+      b.onchange = function () {
+        var id = b.getAttribute('data-tog');
+        var next = APP.subToggle(id);
+        if (next === null) { APP.toast('未找到该订阅规则', 'err'); return; }
+        APP.toast(next === '生效' ? '已启用，命中后将按渠道提醒' : '已停用，不再接收该类提醒', next === '生效' ? 'ok' : '');
+        render();
+      };
+    });
+
+    /* 退订：置停用 + 标记 retired（不物理删除） */
+    document.querySelectorAll('[data-retire]').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-retire');
+        var r = DB.get('rules', id);
+        APP.dialog({
+          title: '确认退订',
+          body: '退订 <b>' + X.esc(r.code) + '</b> 后将<b>立即停止</b>该条件的资产提醒。<br>' +
+            '<span class="xs muted">按规则记录不物理删除，可在订阅列表中重新启用。</span>',
+          okText: '确认退订', danger: true,
+          onOk: function () {
+            APP.subRetire(id);
+            render();
+            APP.toast('已退订 ' + X.esc(r.code) + '，不再接收该类提醒', 'ok');
+          }
+        });
+      };
+    });
+
+    /* 兴趣负反馈：写入 / 作废 InterestFact */
+    document.querySelectorAll('[data-neg]').forEach(function (b) {
+      b.onclick = function () {
+        var cat = b.getAttribute('data-neg');
+        var cur = negFacts().filter(function (f) { return f.category === cat && negActive(f); })[0];
+        if (cur) {
+          DB.update('interests', cur.fact_id, { is_valid: false });
+          DB.audit('兴趣负反馈撤销', cur.fact_id, 'APP 端撤销对「' + cat + '」的不感兴趣标记（事实作废，不物理删除）',
+            { level: '一般', role: '竞买人' });
+          render();
+          APP.toast('已恢复接收「' + cat + '」类推荐', 'ok');
+          return;
+        }
+        var rec = DB.insert('interests', {
+          fact_id: 'FCT-' + String(DB.all('interests').length + 1).padStart(4, '0'),
+          subject_id: me.subject_id, act_type: '不感兴趣', asset_id: null, category: cat,
+          act_time: '2026-10-09', weight: -5, is_valid: true, create_time: '2026-10-09 ' + WB.nowHM()
+        });
+        DB.audit('兴趣负反馈', rec.fact_id, 'APP 端对「' + cat + '」写入不感兴趣事实，推荐引擎将真实排除该品类（30 天有效）',
+          { level: '一般', role: '竞买人' });
+        render();
+        APP.toast('已减少「' + cat + '」类推荐，30 天内不再推荐', 'ok');
+      };
+    });
+
+    /* 触达设置 */
+    document.querySelectorAll('[data-pref]').forEach(function (b) {
+      b.onchange = function () {
+        var k = b.getAttribute('data-pref');
+        var p = pref();
+        p[k] = b.checked;
+        setPref(p);
+        if (k === '__dnd') { APP.toast(b.checked ? '已开启免打扰（22:00-08:00）' : '已关闭免打扰'); return; }
+        APP.toast(b.checked ? '已开启「' + k + '」触达' : '已关闭「' + k + '」触达', b.checked ? 'ok' : '');
+      };
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

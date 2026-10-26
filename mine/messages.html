@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>消息中心 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var F = qs.get('c') || 'all';
+  var CATS = ['交易', '提醒', '公告', '系统', '预警', '推荐'];
+  var ICON = { '交易': '🔨', '提醒': '⏰', '公告': '📢', '系统': '⚙️', '预警': '⚠️', '推荐': '✨' };
+
+  function msgs() {
+    var all = APP.myMsgs().slice().sort(function (a, b) { return String(b.create_time).localeCompare(String(a.create_time)); });
+    if (F === 'all') return all;
+    return all.filter(function (m) { return m.category === F; });
+  }
+  function counts() {
+    var m = {};
+    APP.myMsgs().forEach(function (x) { m[x.category] = (m[x.category] || 0) + 1; });
+    return m;
+  }
+
+  function bodyHTML() {
+    var c = counts();
+    var list = msgs();
+    return '<div class="card"><div class="cb" style="padding:10px 12px;display:flex;align-items:center;gap:8px">' +
+      '<div style="flex:1"><div class="bold" style="font-size:13.5px">全部消息 ' + APP.myMsgs().length + ' 条</div>' +
+      '<div class="xs muted">未读 ' + APP.unreadCount() + ' 条 · 站内信 / PUSH / 短信 / 企微多通道触达</div></div>' +
+      '<button class="btn sm" id="readAll">全部已读</button></div></div>' +
+
+    '<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:9px">' +
+      [['all', '全部']].concat(CATS.filter(function (k) { return c[k]; }).map(function (k) { return [k, k + ' ' + c[k]]; }))
+        .map(function (s) {
+          return '<button class="btn sm" style="flex:none;' + (F === s[0] ? 'background:var(--pri);color:#fff;border-color:var(--pri)' : '') +
+            '" data-go="mine/messages.html?c=' + encodeURIComponent(s[0]) + '">' + X.esc(s[1]) + '</button>';
+        }).join('') + '</div>' +
+
+    (list.length
+      ? '<div class="list">' + list.map(function (m) {
+          return '<div class="li" data-msg="' + X.esc(m.notify_id) + '">' +
+            '<span style="font-size:18px">' + (ICON[m.category] || '📩') + '</span>' +
+            '<div class="li-main"><div class="li-t">' +
+            (m.read ? '' : '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--pri);margin-right:5px;vertical-align:middle"></span>') +
+            X.esc(m.title) + ' ' + APP.tag(m.category, m.category === '交易' ? 'pri' : m.category === '预警' ? 'danger' : m.category === '公告' ? 'info' : '') + '</div>' +
+            '<div class="li-s">' + X.esc(String(m.content).slice(0, 40)) + (String(m.content).length > 40 ? '…' : '') + '</div>' +
+            '<div class="xs muted" style="margin-top:2px">' + X.esc(m.create_time) + '</div></div>' +
+            '<span class="arrow">›</span></div>';
+        }).join('') + '</div>'
+      : '<div class="empty"><div class="ei">📩</div><div class="et">暂无该类消息</div></div>') +
+
+    APP.card('触达设置', '<div class="list tight">' +
+      ['站内信', 'APP 推送', '短信', '企业微信'].map(function (ch, i) {
+        var on = i < 3;
+        return '<div class="li"><span style="font-size:16px">' + (i === 1 ? '📱' : i === 2 ? '✉️' : i === 3 ? '💼' : '🔔') + '</span>' +
+          '<div class="li-main"><div class="li-t">' + ch + '</div>' +
+          '<div class="li-s">' + (i === 3 ? '需企业管理员开通（可选）' : '重要节点多通道触达') + '</div></div>' +
+          '<span class="tag ' + (on ? 'ok' : '') + '">' + (on ? '已开启' : '未开启') + '</span></div>';
+      }).join('') + '</div>' +
+      '<button class="btn blk line-pri" style="margin-top:9px" data-go="mine/subscription.html">前往订阅与偏好设置</button>');
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '消息中心', back: false, tab: 'msg', sideActive: '我的-消息',
+      right: '<button class="ra" id="readAll2">✓</button>',
+      body: '<div style="padding:12px">' + bodyHTML() + '</div>'
+    }));
+    bind();
+  }
+
+  function bind() {
+    document.querySelectorAll('[data-msg]').forEach(function (el) {
+      el.onclick = function () { openMsg(el.getAttribute('data-msg')); };
+    });
+    ['readAll', 'readAll2'].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (b) b.onclick = function () {
+        var n = APP.myMsgs().filter(function (m) { return !m.read; }).length;
+        if (!n) { APP.toast('没有未读消息'); return; }
+        APP.myMsgs().forEach(function (m) { if (!m.read) DB.update('notifications', m.notify_id, { read: true }); });
+        APP.toast('已将 ' + n + ' 条消息标记为已读', 'ok');
+        render();
+      };
+    });
+  }
+
+  /* 打开消息详情：标记已读（真实写入），并可跳转业务对象 */
+  function openMsg(id) {
+    var m = DB.get('notifications', id);
+    if (!m) return;
+    if (!m.read) {
+      DB.update('notifications', m.notify_id, { read: true });
+      /* 必须先 render() 再 APP.sheet()：APP.mount 是 document.body.innerHTML = html，
+         顺序反了会把刚弹出的弹层整块覆盖掉，表现为「点消息毫无反应」。 */
+      render();
+    }
+    APP.sheet({
+      title: m.title,
+      body: '<div class="xs muted">' + X.esc(m.category) + ' · ' + X.esc(m.create_time) + ' · ' + X.esc(m.notify_id) + '</div>' +
+        '<div class="small" style="margin-top:10px;line-height:1.8">' + X.esc(m.content) + '</div>' +
+        (m.link ? '<div class="note" style="margin-top:10px"><span class="ni">🔗</span><div>该消息关联业务对象，可一键前往处理。</div></div>' : ''),
+      foot: '<button class="btn grow" data-close="1">关闭</button>' +
+        (m.link ? '<button class="btn pri grow" data-go="' + X.esc(m.link) + '">前往处理</button>' : '')
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

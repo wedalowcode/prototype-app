@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发现 · 中石化易派客</title>
+<link rel="stylesheet" href="assets/css/app.css">
+</head>
+<body>
+<script src="../prototype-admin/assets/js/common.js"></script>
+<script src="assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  /* ---- 数据准备（全部来自引擎/数据层，不写死） ---- */
+  var liveSes = DB.all('sessions').filter(function (s) { return s.status === '竞拍中'; });
+  var openSes = DB.all('sessions').filter(function (s) { return s.status === '报名中' || s.status === '报名截止'; });
+  var soonSes = DB.all('sessions').filter(function (s) { return s.status === '预告'; });
+  var published = DB.all('assets').filter(function (a) { return a.asset_status !== '已关闭'; });
+  var deals = DB.all('deals');
+  var totalDeal = deals.reduce(function (t, d) { return t + (d.deal_price || 0); }, 0);
+
+  /* ---- Banner ---- */
+  function bannerHTML() {
+    return '<div class="banner" id="banner">' +
+      '<div class="bn-t">中石化易派客</div>' +
+      '<div class="bn-s">公开 · 公平 · 公正　服务商与资产交易一站式</div>' +
+      '<div class="bn-b">滑动查看 ' + liveSes.length + ' 场进行中</div>' +
+      '</div>';
+  }
+
+  /* ---- 统计条 ---- */
+  function statsHTML() {
+    return '<div class="statsbar">' +
+      '<div class="sb-i"><div class="sb-v">' + X.w(totalDeal) + '</div><div class="sb-l">累计成交（万元）</div></div>' +
+      '<div class="sb-i"><div class="sb-v">' + published.length + '</div><div class="sb-l">在售资产</div></div>' +
+      '<div class="sb-i"><div class="sb-v">' + DB.all('subjects').length + '</div><div class="sb-l">入驻竞买人</div></div>' +
+      '<div class="sb-i"><div class="sb-v">' + DB.all('sessions').length + '</div><div class="sb-l">累计场次</div></div>' +
+      '</div>';
+  }
+
+  /* ---- 分类导航 ---- */
+  function catsHTML() {
+    var cats = DICT.category;
+    return APP.card('按品类浏览', '<div class="cats">' + cats.map(function (c) {
+      var n = published.filter(function (a) { return a.category === c; }).length;
+      return '<a href="' + APP.href('asset/list.html?cat=' + encodeURIComponent(c)) + '">' +
+        '<span class="ci2">' + APP.catIcon(c) + '</span>' + X.esc(c) + '<br><span class="xs muted">' + n + ' 项</span></a>';
+    }).join('') + '</div>');
+  }
+
+  /* ---- 公告条 ---- */
+  function noticeHTML() {
+    var ann = DB.all('notifications').filter(function (n) { return n.category === '公告'; })[0];
+    if (!ann) return '';
+    return '<a class="list" href="' + APP.href('mine/messages.html') + '" style="display:block;border-radius:12px;box-shadow:var(--shadow);margin-bottom:10px;text-decoration:none;color:inherit">' +
+      '<div class="li"><span style="font-size:16px">📢</span><div class="li-main">' +
+      '<div class="li-t">' + X.esc(ann.title) + '</div>' +
+      '<div class="li-s">' + X.esc(String(ann.content).slice(0, 42)) + '…</div>' +
+      '</div><span class="arrow">›</span></div></a>';
+  }
+
+  /* ---- 即将开拍（含倒计时） ---- */
+  function soonHTML() {
+    var list = liveSes.concat(openSes).slice(0, 3);
+    if (!list.length) return '';
+    var body = '<div class="list">' + list.map(function (s) {
+      var a = DB.get('assets', s.asset_id);
+      var cd = X.countdown(s.status === '竞拍中' ? s.bid_end : s.reg_end, APP.SERVER_TIME);
+      return '<a class="li" href="' + APP.href('asset/detail.html?id=' + s.asset_id) + '">' +
+        '<span style="font-size:20px">' + APP.catIcon(a ? a.category : '') + '</span>' +
+        '<div class="li-main"><div class="li-t">' + X.esc(a ? a.asset_name : s.session_name) + '</div>' +
+        '<div class="li-s">' + APP.sesTag(s.status) + ' ' +
+        (s.status === '竞拍中' ? '当前价 ¥' + X.yuan(s.current_price) : '起拍价 ¥' + X.yuan(s.start_price)) +
+        '</div></div>' +
+        '<div class="li-r"><div class="c-pri bold mono">' + cd.txt + '</div>' +
+        '<div class="xs muted">' + (s.status === '竞拍中' ? '距结束' : '距报名截止') + '</div></div></a>';
+    }).join('') + '</div>';
+    return APP.card('即将开拍 / 进行中', body, '<a href="' + APP.href('asset/list.html?st=live') + '" style="color:var(--pri);text-decoration:none">全部 ›</a>');
+  }
+
+  /* ---- 为你推荐（引擎按 RecommendRule 输出，APP 端不自行计算） ---- */
+  var skip = {};
+  function recList() {
+    var out = [];
+    DB.all('assets').forEach(function (a) {
+      if (skip[a.asset_id]) return;
+      if (a.asset_status === '已关闭' || a.asset_status === '已成交') return;
+      var m = E.matchRecommend(a, me);
+      if (m && m.hit) out.push({ a: a, m: m });
+    });
+    out.sort(function (p, q) { return (q.m.score || 0) - (p.m.score || 0); });
+    return out.slice(0, 4);
+  }
+
+  function recHTML() {
+    var list = recList();
+    var body;
+    if (!list.length) {
+      body = '<div class="empty"><div class="ei">🔍</div><div class="et">暂无个性化推荐</div>' +
+        '<div class="es">未登录或缺少订阅条件时，展示热门资产</div>' +
+        '<button class="btn line-pri sm" style="margin-top:10px" data-go="mine/subscription.html">去设置订阅</button></div>';
+      DB.all('assets').slice(0, 3).forEach(function (a) { list.push({ a: a, m: { rule: '热门兜底', reason: '按热度兜底展示', score: 0 } }); });
+    }
+    body = list.map(function (it) {
+      var a = it.a, ses = DB.find('sessions', function (s) { return s.asset_id === a.asset_id && s.status !== '已终止'; });
+      var dp = E.depositPlan(me, a.start_price);
+      return '<div class="card flat" style="margin-bottom:10px" data-rec="' + X.esc(a.asset_id) + '">' +
+        '<div class="cb" style="padding:10px 12px">' +
+        '<div style="display:flex;gap:10px">' +
+        '<span style="font-size:26px">' + APP.catIcon(a.category) + '</span>' +
+        '<div style="flex:1;min-width:0">' +
+        '<div class="bold" style="font-size:13.5px" data-go="asset/detail.html?id=' + a.asset_id + '">' + X.esc(a.asset_name) + '</div>' +
+        '<div class="xs muted" style="margin-top:2px">' + X.esc(a.category) + ' · ' + X.esc(a.region || '') + '</div>' +
+        '<div style="margin-top:5px">' + APP.tag('为你推荐', 'pri') + ' ' +
+        '<span class="xs muted">' + X.esc(it.m.rule || '') + '</span></div>' +
+        '</div>' +
+        '<div style="text-align:right;flex:none">' +
+        '<div class="price mid">' + X.w(a.start_price) + '<span class="u">万</span></div>' +
+        '<div class="xs muted">保证金 ' + X.w(dp.amount) + ' 万</div>' +
+        '</div></div>' +
+        '<div class="xs muted" style="margin-top:7px">命中理由：' + X.esc(it.m.reason || '—') + '</div>' +
+        '<div style="display:flex;gap:8px;margin-top:8px">' +
+        '<button class="btn sm grow" data-go="asset/detail.html?id=' + a.asset_id + '">查看详情</button>' +
+        '<button class="btn sm ghost" data-norec="' + X.esc(a.asset_id) + '">不感兴趣</button>' +
+        '</div></div></div>';
+    }).join('');
+    return APP.card('为你推荐', body, '<span class="xs muted">来自后台 RecommendRule</span>');
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '发现', back: false, tab: 'home', sideActive: '首页 / 发现',
+      right: '<button class="ra" data-go="mine/messages.html">💬</button>',
+      body: bannerHTML() + statsHTML() + catsHTML() + noticeHTML() + soonHTML() + recHTML()
+    }));
+    bindRec();
+  }
+
+  function bindRec() {
+    document.querySelectorAll('[data-norec]').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-norec');
+        /* 真实写入兴趣事实（负权重），回流后台排除条件 */
+        DB.insert('interests', {
+          fact_id: 'FCT-' + String(DB.all('interests').length + 1).padStart(4, '0'),
+          subject_id: me.subject_id, act_type: '不感兴趣', asset_id: id,
+          category: (DB.get('assets', id) || {}).category || '',
+          act_time: '2026-10-09', weight: -5, is_valid: true, create_time: '2026-10-09 ' + WB.nowHM()
+        });
+        skip[id] = 1;
+        APP.toast('已减少此类推荐', 'ok');
+        render();
+      };
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

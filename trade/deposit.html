@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>保证金缴纳 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var reg = DB.get('bidRegs', qs.get('reg')) ||
+    APP.myRegs().filter(function (r) { return r.status === '已报名' && !r.deposit_txn_id; })[0] ||
+    APP.myRegs()[0];
+  var ses = reg ? DB.get('sessions', reg.session_id) : null;
+  var asset = reg ? DB.get('assets', reg.asset_id) : null;
+  var txn = reg && reg.deposit_txn_id ? DB.get('depositTxns', reg.deposit_txn_id) : null;
+
+  var CHANNELS = [
+    { k: '银企直连', d: '企业网银直连，实时到账，无需上传凭证', fee: 0, auto: true },
+    { k: '对公转账', d: '线下汇款至平台监管账户，需上传汇款凭证人工核销', fee: 0, auto: false },
+    { k: '第三方支付', d: '支持网银 / 快捷支付，单笔上限 500 万', fee: 0, auto: true }
+  ];
+  var CH = CHANNELS[0].k;
+
+  function bodyHTML() {
+    if (!reg) {
+      return '<div class="empty"><div class="ei">💳</div><div class="et">暂无待缴纳的报名记录</div>' +
+        '<div class="es">请先完成资产报名</div>' +
+        '<button class="btn line-pri sm" style="margin-top:10px" data-go="asset/list.html">去浏览资产</button></div>';
+    }
+    var cd = ses ? X.countdown(ses.reg_end, APP.SERVER_TIME) : null;
+    var acct = APP.depositAccount();
+
+    return APP.card('缴纳标的', APP.kvRows([
+      ['资产', X.esc(asset ? asset.asset_name : '—'), 'left'],
+      ['场次', X.esc(reg.session_id || '—')],
+      ['报名编号', '<span class="mono">' + X.esc(reg.reg_id) + '</span>'],
+      ['报名状态', APP.tag(reg.status, reg.status === '已报名' ? 'ok' : reg.status === '已失效' ? 'danger' : '')],
+      ['缴纳状态', txn ? APP.tag(txn.status, txn.status === '成功' ? 'ok' : 'warn') : APP.tag('待缴纳', 'warn')]
+    ])) +
+
+    '<div class="card"><div class="cb center">' +
+      '<div class="xs muted">应付保证金</div>' +
+      '<div class="price big">¥' + X.yuan(reg.deposit_amount) + '</div>' +
+      (txn ? '<div style="margin-top:6px">' + APP.tag(txn.status, txn.status === '成功' ? 'ok' : 'warn') +
+        ' <span class="xs muted">流水 ' + X.esc(txn.txn_id) + '</span></div>'
+        : (cd && !cd.over
+          ? '<div class="note warn" style="margin-top:9px;text-align:left"><span class="ni">⏰</span><div>距缴纳截止 <b class="mono">' + cd.txt + '</b>，逾期报名将置为「失效」且不参与竞价。</div></div>'
+          : '<div class="note danger" style="margin-top:9px;text-align:left"><span class="ni">!</span><div>已超过缴纳截止时间，请尽快处理或重新报名。</div></div>')) +
+      '</div></div>' +
+
+    (txn ? txnDetailHTML(txn) : payHTML()) +
+
+    APP.card('保证金账户概览', APP.kvRows([
+      ['冻结中', '<b class="c-pri">¥' + X.yuan(acct.frozen) + '</b>'],
+      ['累计已退', '¥' + X.yuan(acct.refunded)],
+      ['累计划扣', '<span class="c-danger">¥' + X.yuan(acct.forfeited) + '</span>'],
+      ['流水笔数', acct.count + ' 笔']
+    ]) + '<button class="btn blk" data-go="mine/deposit.html">查看保证金明细</button>') +
+
+    APP.card('缴纳须知', '<div class="note"><span class="ni">ⓘ</span><div>' +
+      '① 保证金是<b>流水体系</b>（DepositTxn），不是主体上的一个金额字段；每笔缴纳/退还/划扣都有独立流水号与银行流水号。<br>' +
+      '② 对公转账到账以<b>银行到账时间</b>为准，宽限期默认 1 个工作日；到账前支付单置「支付中」，订单不判违约。<br>' +
+      '③ 出价请求带<b>幂等键</b>，重复提交不会产生重复缴纳。<br>' +
+      '④ 未中拍保证金在竞价结束后 3 个工作日内原路解冻。</div></div>');
+  }
+
+  function payHTML() {
+    return APP.card('选择支付方式', CHANNELS.map(function (c) {
+      var on = CH === c.k;
+      return '<label style="display:flex;gap:9px;align-items:flex-start;padding:10px;border:1px solid ' +
+        (on ? 'var(--pri)' : 'var(--line)') + ';background:' + (on ? 'var(--pri-l)' : '#fff') +
+        ';border-radius:10px;margin-bottom:8px;cursor:pointer">' +
+        '<input type="radio" name="ch" value="' + X.esc(c.k) + '"' + (on ? ' checked' : '') + ' style="width:auto;margin-top:3px">' +
+        '<span style="flex:1"><span class="bold" style="font-size:13px">' + X.esc(c.k) +
+        (c.auto ? ' ' + APP.tag('实时到账', 'ok') : ' ' + APP.tag('需人工核销', 'warn')) + '</span>' +
+        '<span class="xs muted" style="display:block;margin-top:2px">' + X.esc(c.d) + '</span></span></label>';
+    }).join('') +
+      (CH === '对公转账' ? '<div class="note gray" style="margin-top:4px"><span class="ni">🏦</span><div>' +
+        '<b>收款信息</b><br>户名：中油易拍客电子商务有限公司<br>开户行：中国工商银行北京石油大厦支行<br>' +
+        '账号：0200 0031 0920 0088 666<br>备注（务必填写）：<b class="mono">' + X.esc(reg.reg_id) + '</b></div></div>' +
+        '<div class="fld" style="margin-top:10px"><label>上传汇款凭证<span class="req">*</span></label>' +
+        '<div class="gcell" id="upload" style="cursor:pointer;text-align:center;padding:16px;border:1px dashed var(--line)">' +
+        '<div style="font-size:22px">📎</div><div class="xs muted" id="upTxt">点击选择凭证文件（jpg / png / pdf，≤ 5MB）</div></div></div>'
+        : ''));
+  }
+
+  function txnDetailHTML(t) {
+    return APP.card('缴纳结果', APP.kvRows([
+      ['流水号', '<span class="mono">' + X.esc(t.txn_id) + '</span>'],
+      ['动作类型', APP.tag(t.action_type, 'pri')],
+      ['金额', '<b class="price mid">¥' + X.yuan(t.amount) + '</b>'],
+      ['支付渠道', X.esc(t.channel)],
+      ['银行流水号', '<span class="mono small">' + X.esc(t.trade_no) + '</span>'],
+      ['发生时间', X.esc(t.occur_time)],
+      ['状态', APP.tag(t.status, t.status === '成功' ? 'ok' : t.status === '支付中' ? 'warn' : 'danger')]
+    ]) +
+      (t.status === '支付中'
+        ? '<div class="note warn" style="margin-top:9px"><span class="ni">⏳</span><div>支付单处于「支付中」，以银行到账时间为准。到账前订单<b>不判违约</b>。</div></div>' +
+          '<button class="btn blk line-pri" style="margin-top:9px" id="retry">重新支付（幂等键 ' + X.esc('IDEM-' + X.hash(t.txn_id).toString(16).slice(0, 8)) + '）</button>'
+        : '<div class="note ok" style="margin-top:9px"><span class="ni">✓</span><div>保证金已到账，报名记录转为<b>有效</b>，可参与竞价。</div></div>') +
+      '<button class="btn pri blk" style="margin-top:9px" data-go="trade/bidding.html?ses=' + X.esc(reg.session_id || '') + '">进入竞价</button>');
+  }
+
+  function barHTML() {
+    if (!reg) return '<div class="actionbar"><button class="btn pri lg grow" data-go="asset/list.html">去浏览资产</button></div>';
+    if (txn) return '<div class="actionbar"><button class="btn lg grow" data-go="mine/deposit.html">保证金明细</button>' +
+      '<button class="btn pri lg grow" data-go="trade/bidding.html?ses=' + X.esc(reg.session_id || '') + '">进入竞价</button></div>';
+    return '<div class="actionbar"><button class="btn lg grow" data-go="asset/detail.html?id=' + X.esc(reg.asset_id) + '">返回资产</button>' +
+      '<button class="btn pri lg grow" id="pay">确认支付 ¥' + X.yuan(reg.deposit_amount) + '</button></div>';
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '保证金缴纳', backTo: 'back', sideActive: '保证金缴纳',
+      body: bodyHTML() + '<div style="height:8px"></div>', bar: barHTML()
+    }));
+    bind();
+  }
+
+  function bind() {
+    document.querySelectorAll('input[name="ch"]').forEach(function (r) {
+      r.onchange = function () { CH = r.value; render(); };
+    });
+    var up = document.getElementById('upload');
+    if (up) up.onclick = function () {
+      var t = document.getElementById('upTxt');
+      if (t) { t.className = 'xs c-ok'; t.textContent = '✓ 已选择：汇款凭证_20261009.jpg（原型演示，不实际上传）'; }
+    };
+    var rb = document.getElementById('retry');
+    if (rb) rb.onclick = function () { doPay(true); };
+    var pb = document.getElementById('pay');
+    if (pb) pb.onclick = function () { doPay(false); };
+  }
+
+  /* 真实写入 DepositTxn 流水（不可变追加），并更新报名记录 */
+  function doPay(isRetry) {
+    if (CH === '对公转账') {
+      var t = document.getElementById('upTxt');
+      if (!t || t.className.indexOf('c-ok') < 0) { APP.toast('对公转账须先上传汇款凭证', 'err'); return; }
+    }
+    APP.dialog({
+      title: '确认支付',
+      body: '支付方式：<b>' + X.esc(CH) + '</b><br>金额：<b class="price">¥' + X.yuan(reg.deposit_amount) + '</b><br>' +
+        '收款方：中油易拍客电子商务有限公司<br>' +
+        '<span class="xs muted">本次请求携带幂等键 IDEM-' + X.esc(X.hash(reg.reg_id + CH).toString(16).slice(0, 8)) + '，重复提交不会重复扣款。</span>',
+      okText: '确认支付',
+      onOk: function () {
+        var manual = CH === '对公转账';
+        var id = 'TXN-' + String(DB.all('depositTxns').length + 1).padStart(4, '0');
+        DB.insert('depositTxns', {
+          txn_id: id, subject_id: me.subject_id, reg_id: reg.reg_id, order_id: null,
+          action_type: '缴纳', amount: reg.deposit_amount, breach_id: null,
+          channel: CH, trade_no: (manual ? 'MANUAL' : 'BANK') + X.hash(reg.reg_id + id).toString().slice(0, 12),
+          status: manual ? '支付中' : '成功',
+          occur_time: '2026-10-09 ' + WB.nowHM(), create_time: '2026-10-09 ' + WB.nowHM()
+        });
+        DB.update('bidRegs', reg.reg_id, { deposit_txn_id: id });
+        DB.audit('保证金缴纳', reg.reg_id, 'APP 端缴纳保证金 ¥' + X.yuan(reg.deposit_amount) +
+          '，渠道 ' + CH + '，流水 ' + id + '（' + (manual ? '待人工核销' : '实时到账') + '）', { level: '重要', role: '竞买人' });
+        txn = DB.get('depositTxns', id);
+        APP.toast(manual ? '已提交，等待人工核销到账' : '支付成功，保证金已到账', 'ok', 2600);
+        render();
+      }
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

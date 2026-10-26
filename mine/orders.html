@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>我的订单 · 中石化易派客</title>
+<link rel="stylesheet" href="../assets/css/app.css">
+</head>
+<body>
+<script src="../../prototype-admin/assets/js/common.js"></script>
+<script src="../assets/js/app.js"></script>
+<script>
+(function () {
+  var U = WB_U, DB = WB_DB, E = WB_ENGINE, X = APP.X;
+  APP.boot();
+  var me = APP.me();
+
+  var qs = new URLSearchParams(location.search);
+  var F = qs.get('st') || 'all';
+  var NODES = [
+    { k: 'sign', t: '签署合同', dl: 'sign_deadline' },
+    { k: 'pay', t: '支付价款', dl: 'pay_deadline' },
+    { k: 'delivery', t: '交割提货', dl: 'pickup_deadline' }
+  ];
+
+  function orders() {
+    var all = APP.myOrders().sort(function (a, b) { return String(b.create_time).localeCompare(String(a.create_time)); });
+    if (F === 'all') return all;
+    return all.filter(function (o) { return o.status === F; });
+  }
+  function statusCounts() {
+    var m = {};
+    APP.myOrders().forEach(function (o) { m[o.status] = (m[o.status] || 0) + 1; });
+    return m;
+  }
+  function nodeBadges(p) {
+    return '<div style="display:flex;gap:4px;margin-top:6px">' + NODES.map(function (n) {
+      var done = p && p.node_status && p.node_status[n.k];
+      var overdue = p && p.is_overdue && !done && String(p[n.dl] || '') < '2026-10-09';
+      return '<span class="tag ' + (done ? 'ok' : overdue ? 'danger' : '') + '" style="font-size:10px">' +
+        (done ? '✓ ' : overdue ? '! ' : '') + n.t + '</span>';
+    }).join('') + '</div>';
+  }
+
+  function card(o) {
+    var a = DB.get('assets', o.asset_id);
+    var p = APP.perfOf(o.order_id);
+    var isDemo = String(o.order_no).indexOf('DEMO') === 0;
+    var next = null;
+    for (var i = 0; i < NODES.length; i++) {
+      if (!(p && p.node_status && p.node_status[NODES[i].k])) { next = NODES[i]; break; }
+    }
+    var href = next ? (next.k === 'sign' ? 'trade/contract.html' : next.k === 'pay' ? 'trade/pay.html' : 'trade/delivery.html') + '?order=' + o.order_id : 'trade/result.html?ses=' + (o.deal_id ? '' : '');
+    return '<div class="card flat" style="margin-bottom:10px"><div class="cb" style="padding:11px 12px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+      '<div class="mono small">' + X.esc(o.order_id) + (isDemo ? ' ' + APP.tag('原型自举', 'warn') : '') + '</div>' +
+      APP.tag(o.status, o.status === '已完成' ? 'ok' : o.status === '已终止' ? 'danger' : 'pri') + '</div>' +
+      '<div style="display:flex;gap:10px;margin-top:8px">' +
+      '<span style="font-size:22px">' + APP.catIcon(a ? a.category : '') + '</span>' +
+      '<div style="flex:1;min-width:0">' +
+      '<div class="bold" style="font-size:13.5px">' + X.esc(a ? a.asset_name : '—') + '</div>' +
+      '<div class="xs muted">' + X.esc(o.category) + ' · 成交 ' + X.w(o.deal_price) + ' 万</div>' +
+      '</div>' +
+      '<div style="text-align:right;flex:none">' +
+      '<div class="price" style="font-size:15px">¥' + X.w(o.total_amount) + '<span class="u">万</span></div>' +
+      '<div class="xs muted">应付总额</div></div></div>' +
+      nodeBadges(p) +
+      (p && p.is_overdue ? '<div class="note danger" style="margin-top:7px"><span class="ni">⚠</span><div>已逾期 ' +
+        X.esc(p.overdue_days) + ' 天，逾期将触发违约认定（保证金不予退还）。</div></div>' : '') +
+      (p ? '<div class="xs muted" style="margin-top:6px">' +
+        (next ? '当前节点：' + next.t + '　截止 ' + X.esc(p[next.dl]) : '全部节点已完成') + '</div>' : '') +
+      '<div style="display:flex;gap:8px;margin-top:8px">' +
+      '<button class="btn sm grow" data-go="trade/result.html?ses=' + X.esc(o.deal_id ? (DB.get('deals', o.deal_id) || {}).session_id || '' : '') + '">成交详情</button>' +
+      (next ? '<button class="btn sm line-pri grow" data-go="' + href + '">去' + next.t + '</button>' : '<button class="btn sm ghost grow" data-go="trade/invoice.html?order=' + o.order_id + '">发票</button>') +
+      '</div></div></div>';
+  }
+
+  function bodyHTML() {
+    var c = statusCounts();
+    var segs = [['all', '全部 ' + APP.myOrders().length], ['已完成', '已完成 ' + (c['已完成'] || 0)],
+      ['待签约', '待签约 ' + (c['待签约'] || 0)], ['已签约', '已签约 ' + (c['已签约'] || 0)],
+      ['待付款', '待付款 ' + (c['待付款'] || 0)], ['已付款', '已付款 ' + (c['已付款'] || 0)]];
+    var list = orders();
+    return '<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:9px">' +
+      segs.map(function (s) {
+        return '<button class="btn sm" style="flex:none;' + (F === s[0] ? 'background:var(--pri);color:#fff;border-color:var(--pri)' : '') +
+          '" data-go="mine/orders.html?st=' + encodeURIComponent(s[0]) + '">' + X.esc(s[1]) + '</button>';
+      }).join('') + '</div>' +
+      (!APP.inProgressOrders().length
+        ? '<div class="note gray" style="margin-bottom:10px"><span class="ni">ⓘ</span><div>' +
+          (APP.myOrders().length ? '您当前没有在途订单（历史订单均已履约完成）。' : '您当前没有订单。') +
+          '如需演示签约 / 付款 / 交割的可操作链路，可生成一份在途单据。' +
+          '<br><button class="btn sm line-pri" style="margin-top:6px" id="mkDemo">生成演示在途订单</button></div></div>'
+        : '<div class="note" style="margin-bottom:10px"><span class="ni">ⓘ</span><div>' +
+          '当前有 <b>' + APP.inProgressOrders().length + '</b> 张在途订单，可继续演示签约 / 付款 / 交割。' +
+          '<br><span class="xs muted">演示单据由「原型自举」生成（种子数据中本主体无在途单据），界面已明确标注，不冒充真实成交记录。</span>' +
+          '</div></div>') +
+      (list.length ? list.map(card).join('')
+        : '<div class="empty"><div class="ei">📋</div><div class="et">暂无该状态的订单</div>' +
+          '<button class="btn line-pri sm" style="margin-top:10px" data-go="mine/orders.html?st=all">查看全部</button></div>');
+  }
+
+  function render() {
+    APP.mount(APP.shell({
+      title: '我的订单', backTo: 'back', sideActive: '我的-订单',
+      body: '<div style="padding:12px">' + bodyHTML() + '</div>'
+    }));
+    var md = document.getElementById('mkDemo');
+    if (md) md.onclick = function () {
+      var o = APP.demoCreateOrder();
+      APP.toast('已生成演示在途订单 ' + o.order_id, 'ok', 2600);
+      render();
+    };
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>
